@@ -12,6 +12,7 @@ import sys
 import shutil
 import time
 import urllib.request
+import re
 from collections import deque
 from pathlib import Path
 from datetime import datetime
@@ -53,6 +54,7 @@ school_cache_lock = threading.Lock()
 # 日志配置
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 
 def _get_weban_python_command() -> list[str]:
@@ -117,6 +119,12 @@ async def start_task():
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env={
+                    **os.environ,
+                    "PYTHONUTF8": "1",
+                    "PYTHONIOENCODING": "utf-8",
+                    "NO_COLOR": "1",
+                },
                 bufsize=1,
                 creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             )
@@ -374,7 +382,8 @@ def save_config(config: Dict[str, Any]) -> bool:
 
 def _append_task_log(line: str) -> None:
     global task_log_sequence
-    message = line.rstrip()
+    # 本体的 Loguru 终端 sink 会输出 ANSI 颜色控制码；实时日志只保留可读文本。
+    message = ANSI_ESCAPE_RE.sub("", line).rstrip()
     if not message:
         return
     with task_lock:
@@ -1380,6 +1389,7 @@ HTML_CONTENT = """
                 const logsEl = document.getElementById('realtime-logs');
                 const line = document.createElement('div');
                 line.className = 'log-line';
+                // The backend already removes terminal color sequences.
                 line.textContent = event.data;
                 logsEl.appendChild(line);
                 logsEl.scrollTop = logsEl.scrollHeight;
