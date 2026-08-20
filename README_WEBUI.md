@@ -12,18 +12,16 @@ WeBan WebUI provides a modern, dark-themed web interface for managing WeBan acco
 - **Status Monitoring**: Visual task status indicators
 
 ### 👤 Account Management
-- Add new accounts with username/password
+- Add new accounts with school name, username, and password
 - View all configured accounts
 - Delete accounts individually
 - Duplicate detection
 
 ### ⚙️ Global Settings
-- Enable/disable learning mode
-- Enable/disable exam mode
-- Configure concurrent task count
-- Set retry attempts
-- Adjust timeout values
-- Automatic config.toml persistence
+- Configure learning mode: `false`, `true`, or `force`
+- Configure exam mode: `false`, `true`, `perfect`, or `force`
+- Configure `max_workers`, study time, random answers, and video speed
+- Automatic `config.toml` persistence without dropping unknown settings
 
 ### 📋 Log Viewer
 - Browse all historical log files
@@ -62,6 +60,20 @@ python webui.py
 
 Default: http://127.0.0.1:8080
 
+The WebUI and `main.py` are in the same directory in this fork. The WebUI
+starts the real WeBan process with that directory as its working directory.
+The account section writes the format used by WeBan:
+
+```toml
+[[account]]
+tenant_name = "学校登录页显示的完整名称"
+username = "学号"
+password = "密码"
+```
+
+The school name is required and must exactly match the school/tenant name
+shown on the WeBan login page.
+
 ### Custom Host/Port
 
 ```bash
@@ -77,6 +89,9 @@ python webui.py
 set WB_DATA_DIR=D:\custom\path
 python webui.py
 ```
+
+`WB_DATA_DIR` stores `config.toml` and `logs` in the selected directory while
+the WebUI still starts the local `main.py`.
 
 ## Architecture
 

@@ -27,11 +27,12 @@ if errorlevel 1 (
     )
 )
 
-echo [INFO] Starting WeBan WebUI...
+echo [INFO] Starting WeBan WebUI with the local WeBan source...
 echo [INFO] Access at: http://127.0.0.1:8080
 echo [INFO] Press Ctrl+C to stop
 echo.
 
+cd /d "%~dp0"
 python webui.py
 
 if errorlevel 1 (

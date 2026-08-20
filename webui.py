@@ -7,6 +7,9 @@ import json
 import subprocess
 import threading
 import logging
+import asyncio
+import sys
+from collections import deque
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any
@@ -16,22 +19,30 @@ from fastapi.responses import HTMLResponse
 import uvicorn
 
 try:
-    import tomli
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+
+try:
     import tomli_w
 except ImportError:
-    tomli = None
     tomli_w = None
 
-# 配置
-CONFIG_FILE = Path("config.toml")
-LOG_DIR = Path("logs")
-LOG_DIR.mkdir(exist_ok=True)
+# 本体代码始终位于本文件目录；WB_DATA_DIR 可把配置和日志放到持久化目录。
+APP_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path(os.environ.get("WB_DATA_DIR", APP_DIR)).resolve()
+CONFIG_FILE = DATA_DIR / "config.toml"
+LOG_DIR = DATA_DIR / "logs"
+MAIN_SCRIPT = APP_DIR / "main.py"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # 全局状态
 app = FastAPI(title="WeBan WebUI")
 task_process: Optional[subprocess.Popen] = None
 task_running = False
-websocket_clients = []
+task_lock = threading.RLock()
+task_logs: deque[tuple[int, str]] = deque(maxlen=500)
+task_log_sequence = 0
 
 # 日志配置
 logging.basicConfig(level=logging.INFO)
@@ -43,29 +54,66 @@ logger = logging.getLogger(__name__)
 @app.get("/api/task/status")
 async def get_task_status():
     """获取任务状态"""
-    return {"running": task_running}
+    return {
+        "running": task_process is not None and task_process.poll() is None
+    }
 
 
 @app.post("/api/task/start")
 async def start_task():
     """启动任务"""
     global task_process, task_running
-    
-    if task_running:
-        return {"success": False, "message": "Task already running"}
-    
-    try:
-        task_process = subprocess.Popen(
-            ["python", "main.py"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        task_running = True
-        return {"success": True}
-    except Exception as e:
-        logger.error(f"Failed to start task: {e}")
-        return {"success": False, "message": str(e)}
+
+    with task_lock:
+        if task_process is not None and task_process.poll() is None:
+            return {"success": False, "message": "任务已在运行中"}
+        if not MAIN_SCRIPT.is_file():
+            return {"success": False, "message": "未找到 main.py 本体程序"}
+
+        accounts = load_config().get("account", [])
+        if not any(
+            account.get("tenant_name")
+            and (
+                account.get("username")
+                or (account.get("user_id") and account.get("token"))
+            )
+            for account in accounts
+        ):
+            return {
+                "success": False,
+                "message": "请先在账号管理中保存学校和账号信息",
+            }
+
+        try:
+            task_process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-u",
+                    MAIN_SCRIPT.name,
+                    "--data-dir",
+                    str(DATA_DIR),
+                    "--non-interactive",
+                ],
+                cwd=str(APP_DIR),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+            )
+            task_running = True
+            _append_task_log("WeBan 任务已启动。")
+            threading.Thread(
+                target=_stream_task_output,
+                args=(task_process,),
+                daemon=True,
+            ).start()
+            return {"success": True}
+        except OSError as exc:
+            logger.exception("启动 WeBan 失败")
+            return {"success": False, "message": f"启动失败：{exc}"}
 
 
 @app.post("/api/task/stop")
@@ -73,54 +121,82 @@ async def stop_task():
     """停止任务"""
     global task_process, task_running
     
-    if not task_running:
-        return {"success": False, "message": "Task not running"}
-    
-    try:
-        if task_process:
+    with task_lock:
+        if task_process is None or task_process.poll() is not None:
+            task_running = False
+            return {"success": False, "message": "任务未在运行"}
+
+        try:
             task_process.terminate()
             task_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            task_process.kill()
+            task_process.wait(timeout=5)
+        except OSError as exc:
+            logger.exception("停止 WeBan 失败")
+            return {"success": False, "message": f"停止失败：{exc}"}
+
         task_running = False
+        _append_task_log("WeBan 任务已停止。")
         return {"success": True}
-    except Exception as e:
-        logger.error(f"Failed to stop task: {e}")
-        return {"success": False, "message": str(e)}
 
 
 @app.get("/api/accounts")
 async def get_accounts():
     """获取账号列表"""
     config = load_config()
-    accounts = config.get("accounts", [])
+    accounts = config.get("account", [])
     return {"accounts": accounts}
 
 
 @app.post("/api/accounts")
 async def add_account(data: Dict[str, Any]):
     """添加账号"""
+    tenant_name = str(data.get("tenant_name", "")).strip()
+    username = str(data.get("username", "")).strip()
+    password = str(data.get("password", "")).strip() or username
+    if not tenant_name or not username:
+        return {"success": False, "message": "学校名称和用户名不能为空"}
+
     config = load_config()
-    if "accounts" not in config:
-        config["accounts"] = []
-    
-    config["accounts"].append({
-        "username": data.get("username"),
-        "password": data.get("password")
-    })
-    
-    save_config(config)
+    accounts = config.setdefault("account", [])
+    if any(
+        account.get("tenant_name") == tenant_name
+        and account.get("username") == username
+        for account in accounts
+    ):
+        return {"success": False, "message": "该学校下的账号已存在"}
+
+    accounts.append(
+        {
+            "tenant_name": tenant_name,
+            "username": username,
+            "password": password,
+        }
+    )
+    if not save_config(config):
+        return {"success": False, "message": "配置文件保存失败，请检查文件权限"}
     return {"success": True}
 
 
 @app.delete("/api/accounts/{username}")
-async def delete_account(username: str):
+async def delete_account(username: str, tenant_name: Optional[str] = None):
     """删除账号"""
     config = load_config()
-    if "accounts" in config:
-        config["accounts"] = [
-            acc for acc in config["accounts"]
-            if acc.get("username") != username
-        ]
-        save_config(config)
+    accounts = config.get("account", [])
+    remaining = [
+        account
+        for account in accounts
+        if not (
+            account.get("username") == username
+            and (tenant_name is None or account.get("tenant_name") == tenant_name)
+        )
+    ]
+    if len(remaining) == len(accounts):
+        return {"success": False, "message": "未找到该账号"}
+    config["account"] = remaining
+    if not save_config(config):
+        return {"success": False, "message": "配置文件保存失败，请检查文件权限"}
     return {"success": True}
 
 
@@ -135,8 +211,9 @@ async def get_settings():
 async def update_settings(data: Dict[str, Any]):
     """更新设置"""
     config = load_config()
-    config["settings"] = data
-    save_config(config)
+    config.setdefault("settings", {}).update(data)
+    if not save_config(config):
+        return {"success": False, "message": "配置文件保存失败，请检查文件权限"}
     return {"success": True}
 
 
@@ -145,9 +222,13 @@ async def get_logs():
     """获取日志列表"""
     logs = []
     if LOG_DIR.exists():
-        for log_file in sorted(LOG_DIR.glob("*.log"), reverse=True):
+        for log_file in sorted(
+            LOG_DIR.rglob("*.log"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        ):
             logs.append({
-                "name": log_file.name,
+                "name": log_file.relative_to(LOG_DIR).as_posix(),
                 "size": log_file.stat().st_size,
                 "modified": log_file.stat().st_mtime
             })
@@ -158,12 +239,21 @@ async def get_logs():
 async def websocket_logs(websocket: WebSocket):
     """WebSocket 实时日志推送"""
     await websocket.accept()
-    websocket_clients.append(websocket)
+    last_sequence = 0
     try:
         while True:
-            await websocket.receive_text()
+            with task_lock:
+                pending = [
+                    (sequence, line)
+                    for sequence, line in task_logs
+                    if sequence > last_sequence
+                ]
+            for sequence, line in pending:
+                await websocket.send_text(line)
+                last_sequence = sequence
+            await asyncio.sleep(0.4)
     except WebSocketDisconnect:
-        websocket_clients.remove(websocket)
+        pass
 
 
 # ========== 配置管理 ==========
@@ -171,25 +261,65 @@ async def websocket_logs(websocket: WebSocket):
 def load_config() -> Dict[str, Any]:
     """加载配置"""
     if not CONFIG_FILE.exists():
-        return {}
-    
+        return {"account": [], "settings": {}}
+
     try:
-        if tomli:
-            with open(CONFIG_FILE, "rb") as f:
-                return tomli.load(f)
-    except:
-        pass
-    return {}
+        with open(CONFIG_FILE, "rb") as f:
+            config = tomllib.load(f)
+            # 兼容早期 WebUI 使用的错误复数键。
+            if "account" not in config and "accounts" in config:
+                config["account"] = config.pop("accounts")
+            config.setdefault("account", [])
+            config.setdefault("settings", {})
+            return config
+    except Exception as exc:
+        logger.error("读取配置失败：%s", exc)
+    return {"account": [], "settings": {}}
 
 
-def save_config(config: Dict[str, Any]):
+def save_config(config: Dict[str, Any]) -> bool:
     """保存配置"""
     if tomli_w is None:
         logger.error("tomli_w not installed, cannot save config")
+        return False
+
+    temporary_file = CONFIG_FILE.with_suffix(".toml.tmp")
+    try:
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(temporary_file, "wb") as file:
+            tomli_w.dump(config, file)
+        os.replace(temporary_file, CONFIG_FILE)
+        return True
+    except OSError as exc:
+        logger.exception("保存配置失败：%s", exc)
+        temporary_file.unlink(missing_ok=True)
+        return False
+
+
+def _append_task_log(line: str) -> None:
+    global task_log_sequence
+    message = line.rstrip()
+    if not message:
         return
-    
-    with open(CONFIG_FILE, "wb") as f:
-        tomli_w.dump(config, f)
+    with task_lock:
+        task_log_sequence += 1
+        task_logs.append((task_log_sequence, message))
+
+
+def _stream_task_output(process: subprocess.Popen) -> None:
+    global task_running
+    if process.stdout is None:
+        return
+
+    try:
+        for line in process.stdout:
+            _append_task_log(line)
+    finally:
+        return_code = process.wait()
+        _append_task_log(f"WeBan 任务已退出，退出码：{return_code}。")
+        with task_lock:
+            if task_process is process:
+                task_running = False
 
 # ========== HTML 界面 ==========
 
@@ -258,25 +388,26 @@ HTML_CONTENT = """
         }
 
         .lang-switch {
-            display: flex;
-            gap: 0.5rem;
             background: var(--surface-2);
-            padding: 4px;
-            border-radius: var(--radius-full);
+            border: 1px solid var(--surface-3);
+            border-radius: var(--radius);
         }
 
         .lang-btn {
-            padding: 0.5rem 1rem;
+            width: 2.5rem;
+            height: 2.5rem;
+            display: grid;
+            place-items: center;
+            padding: 0;
             border: none;
             background: transparent;
             color: var(--text-secondary);
-            border-radius: var(--radius-full);
+            border-radius: var(--radius);
             cursor: pointer;
             transition: all 0.2s;
-            font-size: 0.875rem;
         }
 
-        .lang-btn.active {
+        .lang-btn:hover {
             background: var(--accent);
             color: white;
         }
@@ -472,8 +603,14 @@ HTML_CONTENT = """
         }
 
         .account-username {
+            font-weight: 600;
+            color: var(--accent);
+        }
+
+        .account-school {
             font-weight: 500;
             color: var(--text-primary);
+            font-size: 0.875rem;
         }
 
         .account-password {
@@ -526,8 +663,12 @@ HTML_CONTENT = """
         <div class="header">
             <div class="logo">WeBan WebUI</div>
             <div class="lang-switch">
-                <button class="lang-btn active" data-lang="zh">中文</button>
-                <button class="lang-btn" data-lang="en">English</button>
+                <button id="language-toggle" class="lang-btn" type="button" title="切换语言" aria-label="切换语言">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                        <circle cx="12" cy="12" r="9" stroke-width="2"></circle>
+                        <path d="M3 12h18M12 3c2.4 2.5 3.6 5.5 3.6 9S14.4 18.5 12 21C9.6 18.5 8.4 15.5 8.4 12S9.6 5.5 12 3z" stroke-width="2"></path>
+                    </svg>
+                </button>
             </div>
         </div>
 
@@ -587,12 +728,16 @@ HTML_CONTENT = """
                     <h2 class="card-title" data-i18n="accounts.title">账号管理</h2>
                     <form id="form-add-account">
                         <div class="form-group">
+                            <label class="form-label" data-i18n="accounts.school">学校名称</label>
+                            <input type="text" name="tenant_name" class="form-input" required>
+                        </div>
+                        <div class="form-group">
                             <label class="form-label" data-i18n="accounts.username">用户名</label>
                             <input type="text" name="username" class="form-input" required>
                         </div>
                         <div class="form-group">
                             <label class="form-label" data-i18n="accounts.password">密码</label>
-                            <input type="password" name="password" class="form-input" required>
+                            <input type="password" name="password" class="form-input">
                         </div>
                         <button type="submit" class="btn btn-primary" data-i18n="accounts.add">添加账号</button>
                     </form>
@@ -610,15 +755,40 @@ HTML_CONTENT = """
                     <form id="form-settings">
                         <div class="form-group">
                             <label class="form-label" data-i18n="settings.studyMode">学习模式</label>
-                            <input type="checkbox" name="study_mode" id="study_mode">
+                            <select name="study_mode" id="study_mode" class="form-input">
+                                <option value="false" data-i18n="settings.off">关闭</option>
+                                <option value="true" data-i18n="settings.normal">正常</option>
+                                <option value="force" data-i18n="settings.force">强制</option>
+                            </select>
                         </div>
                         <div class="form-group">
                             <label class="form-label" data-i18n="settings.examMode">考试模式</label>
-                            <input type="checkbox" name="exam_mode" id="exam_mode">
+                            <select name="exam_mode" id="exam_mode" class="form-input">
+                                <option value="false" data-i18n="settings.off">关闭</option>
+                                <option value="true" data-i18n="settings.normal">正常</option>
+                                <option value="perfect" data-i18n="settings.perfect">满分优先</option>
+                                <option value="force" data-i18n="settings.force">强制</option>
+                            </select>
                         </div>
                         <div class="form-group">
-                            <label class="form-label" data-i18n="settings.concurrent">并发数</label>
-                            <input type="number" name="concurrent" class="form-input" value="3" min="1" max="10">
+                            <label class="form-label" data-i18n="settings.maxWorkers">最大并发数</label>
+                            <input type="number" name="max_workers" class="form-input" value="5" min="1" max="50">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label" data-i18n="settings.studyTime">最少学习停留（秒）</label>
+                            <input type="number" name="study_time" class="form-input" value="30" min="0">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label" data-i18n="settings.randomAnswer">未知题随机作答</label>
+                            <input type="checkbox" name="random_answer" id="random_answer">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label" data-i18n="settings.videoSpeed">视频课程速度</label>
+                            <select name="video_speed" id="video_speed" class="form-input">
+                                <option value="0" data-i18n="settings.videoInstant">仅按最少停留</option>
+                                <option value="1" data-i18n="settings.videoNormal">正常</option>
+                                <option value="2" data-i18n="settings.videoDouble">2 倍</option>
+                            </select>
                         </div>
                         <button type="submit" class="btn btn-primary" data-i18n="settings.save">保存设置</button>
                     </form>
@@ -649,6 +819,7 @@ HTML_CONTENT = """
                 'dashboard.stopped': '已停止',
                 'dashboard.realtimeLogs': '实时日志',
                 'accounts.title': '账号管理',
+                'accounts.school': '学校名称',
                 'accounts.username': '用户名',
                 'accounts.password': '密码',
                 'accounts.add': '添加账号',
@@ -657,7 +828,17 @@ HTML_CONTENT = """
                 'settings.title': '全局设置',
                 'settings.studyMode': '学习模式',
                 'settings.examMode': '考试模式',
-                'settings.concurrent': '并发数',
+                'settings.maxWorkers': '最大并发数',
+                'settings.studyTime': '最少学习停留（秒）',
+                'settings.randomAnswer': '未知题随机作答',
+                'settings.videoSpeed': '视频课程速度',
+                'settings.off': '关闭',
+                'settings.normal': '正常',
+                'settings.force': '强制',
+                'settings.perfect': '满分优先',
+                'settings.videoInstant': '仅按最少停留',
+                'settings.videoNormal': '正常',
+                'settings.videoDouble': '2 倍',
                 'settings.save': '保存设置',
                 'logs.title': '历史日志',
                 'msg.success': '操作成功',
@@ -675,6 +856,7 @@ HTML_CONTENT = """
                 'dashboard.stopped': 'Stopped',
                 'dashboard.realtimeLogs': 'Realtime Logs',
                 'accounts.title': 'Account Management',
+                'accounts.school': 'School Name',
                 'accounts.username': 'Username',
                 'accounts.password': 'Password',
                 'accounts.add': 'Add Account',
@@ -683,7 +865,17 @@ HTML_CONTENT = """
                 'settings.title': 'Global Settings',
                 'settings.studyMode': 'Study Mode',
                 'settings.examMode': 'Exam Mode',
-                'settings.concurrent': 'Concurrent',
+                'settings.maxWorkers': 'Max Workers',
+                'settings.studyTime': 'Minimum Study Time (seconds)',
+                'settings.randomAnswer': 'Random Answer for Unknown Questions',
+                'settings.videoSpeed': 'Video Course Speed',
+                'settings.off': 'Off',
+                'settings.normal': 'Normal',
+                'settings.force': 'Force',
+                'settings.perfect': 'Perfect Score',
+                'settings.videoInstant': 'Minimum time only',
+                'settings.videoNormal': 'Normal',
+                'settings.videoDouble': '2x',
                 'settings.save': 'Save Settings',
                 'logs.title': 'Log History',
                 'msg.success': 'Success',
@@ -696,11 +888,9 @@ HTML_CONTENT = """
 
         document.addEventListener('DOMContentLoaded', function() {
             setLanguage(currentLang);
-            
-            document.querySelectorAll('.lang-btn').forEach(btn => {
-                btn.addEventListener('click', () => {
-                    setLanguage(btn.dataset.lang);
-                });
+
+            document.getElementById('language-toggle').addEventListener('click', () => {
+                setLanguage(currentLang === 'zh' ? 'en' : 'zh');
             });
             
             document.querySelectorAll('.nav-item').forEach(item => {
@@ -755,6 +945,8 @@ HTML_CONTENT = """
                         alert(i18n[currentLang]['msg.success']);
                         e.target.reset();
                         loadAccounts();
+                    } else {
+                        alert(i18n[currentLang]['msg.error'] + ': ' + result.message);
                     }
                 } catch (error) {
                     alert(i18n[currentLang]['msg.error'] + ': ' + error.message);
@@ -765,8 +957,10 @@ HTML_CONTENT = """
                 e.preventDefault();
                 const formData = new FormData(e.target);
                 const data = Object.fromEntries(formData);
-                data.study_mode = document.getElementById('study_mode').checked;
-                data.exam_mode = document.getElementById('exam_mode').checked;
+                data.max_workers = Number(data.max_workers);
+                data.study_time = Number(data.study_time);
+                data.video_speed = Number(data.video_speed);
+                data.random_answer = document.getElementById('random_answer').checked;
                 
                 try {
                     const response = await fetch('/api/settings', {
@@ -777,6 +971,8 @@ HTML_CONTENT = """
                     const result = await response.json();
                     if (result.success) {
                         alert(i18n[currentLang]['msg.success']);
+                    } else {
+                        alert(i18n[currentLang]['msg.error'] + ': ' + result.message);
                     }
                 } catch (error) {
                     alert(i18n[currentLang]['msg.error'] + ': ' + error.message);
@@ -795,10 +991,6 @@ HTML_CONTENT = """
             currentLang = lang;
             localStorage.setItem('lang', lang);
             
-            document.querySelectorAll('.lang-btn').forEach(btn => {
-                btn.classList.toggle('active', btn.dataset.lang === lang);
-            });
-            
             document.querySelectorAll('[data-i18n]').forEach(el => {
                 const key = el.dataset.i18n;
                 const translation = i18n[lang][key];
@@ -806,7 +998,11 @@ HTML_CONTENT = """
                     el.textContent = translation;
                 }
             });
-            
+
+            const languageToggle = document.getElementById('language-toggle');
+            const nextLanguage = lang === 'zh' ? 'English' : '中文';
+            languageToggle.title = `${lang === 'zh' ? '切换到' : 'Switch to'} ${nextLanguage}`;
+            languageToggle.setAttribute('aria-label', languageToggle.title);
             document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
         }
 
@@ -858,13 +1054,18 @@ HTML_CONTENT = """
                     item.className = 'account-item';
                     item.innerHTML = `
                         <div class="account-info">
-                            <div class="account-username">${escapeHtml(account.username)}</div>
-                            <div class="account-password">${'*'.repeat(account.password.length)}</div>
+                            <div class="account-school">${escapeHtml(account.tenant_name || '')}</div>
+                            <div class="account-username">${escapeHtml(account.username || '')}</div>
+                            <div class="account-password">${'*'.repeat((account.password || '').length)}</div>
                         </div>
-                        <button class="btn-delete" onclick="deleteAccount('${escapeHtml(account.username)}')">
-                            ${i18n[currentLang]['accounts.delete']}
-                        </button>
                     `;
+                    const deleteButton = document.createElement('button');
+                    deleteButton.className = 'btn-delete';
+                    deleteButton.textContent = i18n[currentLang]['accounts.delete'];
+                    deleteButton.addEventListener('click', () => {
+                        deleteAccount(account.username || '', account.tenant_name || '');
+                    });
+                    item.appendChild(deleteButton);
                     listEl.appendChild(item);
                 });
             } catch (error) {
@@ -872,16 +1073,18 @@ HTML_CONTENT = """
             }
         }
 
-        async function deleteAccount(username) {
-            if (!confirm(`Delete account "${username}"?`)) return;
+        async function deleteAccount(username, tenantName) {
+            if (!confirm(`Delete account "${tenantName} / ${username}"?`)) return;
             
             try {
-                const response = await fetch(`/api/accounts/${encodeURIComponent(username)}`, {
+                const response = await fetch(`/api/accounts/${encodeURIComponent(username)}?tenant_name=${encodeURIComponent(tenantName)}`, {
                     method: 'DELETE'
                 });
                 const data = await response.json();
                 if (data.success) {
                     loadAccounts();
+                } else {
+                    alert(i18n[currentLang]['msg.error'] + ': ' + data.message);
                 }
             } catch (error) {
                 alert(i18n[currentLang]['msg.error'] + ': ' + error.message);
@@ -894,13 +1097,24 @@ HTML_CONTENT = """
                 const data = await response.json();
                 
                 if (data.study_mode !== undefined) {
-                    document.getElementById('study_mode').checked = data.study_mode;
+                    document.getElementById('study_mode').value = String(data.study_mode);
                 }
                 if (data.exam_mode !== undefined) {
-                    document.getElementById('exam_mode').checked = data.exam_mode;
+                    document.getElementById('exam_mode').value = String(data.exam_mode);
                 }
-                if (data.concurrent !== undefined) {
-                    document.querySelector('[name="concurrent"]').value = data.concurrent;
+                if (data.max_workers !== undefined) {
+                    document.querySelector('[name="max_workers"]').value = data.max_workers;
+                }
+                if (data.study_time !== undefined) {
+                    document.querySelector('[name="study_time"]').value = data.study_time;
+                }
+                if (data.random_answer !== undefined) {
+                    document.getElementById('random_answer').checked =
+                        data.random_answer === true
+                        || ['1', 'true', 'yes', 'on'].includes(String(data.random_answer).toLowerCase());
+                }
+                if (data.video_speed !== undefined) {
+                    document.getElementById('video_speed').value = String(data.video_speed);
                 }
             } catch (error) {
                 console.error('Failed to load settings:', error);
@@ -975,6 +1189,7 @@ async def root():
 
 
 if __name__ == "__main__":
+    host = os.environ.get("WEBUI_HOST", "127.0.0.1")
     port = int(os.environ.get("WEBUI_PORT", 8080))
-    print(f"Starting WeBan WebUI on http://127.0.0.1:{port}")
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+    print(f"Starting WeBan WebUI on http://{host}:{port}")
+    uvicorn.run(app, host=host, port=port, log_level="info")
