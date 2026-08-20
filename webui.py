@@ -9,6 +9,8 @@ import threading
 import logging
 import asyncio
 import sys
+import time
+import urllib.request
 from collections import deque
 from pathlib import Path
 from datetime import datetime
@@ -43,6 +45,9 @@ task_running = False
 task_lock = threading.RLock()
 task_logs: deque[tuple[int, str]] = deque(maxlen=500)
 task_log_sequence = 0
+school_cache: list[str] = []
+school_cache_loaded_at = 0.0
+school_cache_lock = threading.Lock()
 
 # 日志配置
 logging.basicConfig(level=logging.INFO)
@@ -147,6 +152,17 @@ async def get_accounts():
     config = load_config()
     accounts = config.get("account", [])
     return {"accounts": accounts}
+
+
+@app.get("/api/schools")
+def get_schools():
+    """获取官方学校列表，失败时返回配置中已有的学校名称。"""
+    schools = _get_school_names_from_config()
+    try:
+        schools = _load_school_names() or schools
+    except (OSError, ValueError, TimeoutError) as exc:
+        logger.warning("获取学校列表失败，使用本地学校列表：%s", exc)
+    return {"schools": schools, "source": "official" if school_cache else "local"}
 
 
 @app.post("/api/accounts")
@@ -275,6 +291,54 @@ def load_config() -> Dict[str, Any]:
     except Exception as exc:
         logger.error("读取配置失败：%s", exc)
     return {"account": [], "settings": {}}
+
+
+def _get_school_names_from_config() -> list[str]:
+    """从现有配置提取学校名，作为离线兜底和快速首屏建议。"""
+    names = {
+        str(account.get("tenant_name", "")).strip()
+        for account in load_config().get("account", [])
+    }
+    return sorted(name for name in names if name)
+
+
+def _load_school_names() -> list[str]:
+    """从 WeBan 登录接口获取学校全称列表，并在内存中缓存。"""
+    global school_cache, school_cache_loaded_at
+    now = time.monotonic()
+    with school_cache_lock:
+        if school_cache and now - school_cache_loaded_at < 6 * 60 * 60:
+            return list(school_cache)
+
+    timestamp = f"{time.time():.3f}"
+    request = urllib.request.Request(
+        "https://weiban.mycourse.cn/pharos/login/getTenantListWithLetter.do"
+        f"?timestamp={timestamp}",
+        data=b"",
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=12) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+
+    schools = {
+        str(entry.get("name", "")).strip()
+        for group in payload.get("data", [])
+        for entry in group.get("list", [])
+        if entry.get("name")
+    }
+    if not schools:
+        raise ValueError("官方接口没有返回学校列表")
+
+    result = sorted(schools)
+    with school_cache_lock:
+        school_cache = result
+        school_cache_loaded_at = time.monotonic()
+    return list(result)
 
 
 def save_config(config: Dict[str, Any]) -> bool:
@@ -582,6 +646,54 @@ HTML_CONTENT = """
             background: var(--surface-3);
         }
 
+        .school-picker {
+            position: relative;
+        }
+
+        .school-suggestions {
+            position: absolute;
+            z-index: 20;
+            top: calc(100% + 0.35rem);
+            left: 0;
+            right: 0;
+            display: none;
+            max-height: 260px;
+            overflow-y: auto;
+            padding: 0.35rem;
+            background: var(--surface-1);
+            border: 1px solid var(--surface-3);
+            border-radius: var(--radius);
+            box-shadow: 0 14px 30px rgba(0, 0, 0, 0.32);
+        }
+
+        .school-suggestions.visible {
+            display: block;
+        }
+
+        .school-suggestion {
+            width: 100%;
+            padding: 0.65rem 0.75rem;
+            border: 0;
+            border-radius: calc(var(--radius) - 2px);
+            background: transparent;
+            color: var(--text-primary);
+            text-align: left;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+
+        .school-suggestion:hover,
+        .school-suggestion.highlighted {
+            background: var(--surface-3);
+            color: var(--accent);
+        }
+
+        .school-hint {
+            margin-top: 0.4rem;
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+        }
+
         .account-list {
             display: grid;
             gap: 0.75rem;
@@ -729,7 +841,12 @@ HTML_CONTENT = """
                     <form id="form-add-account">
                         <div class="form-group">
                             <label class="form-label" data-i18n="accounts.school">学校名称</label>
-                            <input type="text" name="tenant_name" class="form-input" required>
+                            <div class="school-picker">
+                                <input type="text" name="tenant_name" id="tenant_name" class="form-input" required
+                                       autocomplete="off" data-i18n-placeholder="accounts.schoolPlaceholder">
+                                <div id="school-suggestions" class="school-suggestions" role="listbox"></div>
+                            </div>
+                            <div class="school-hint" data-i18n="accounts.schoolHint">输入学校名称的一部分，从列表中选择完整名称</div>
                         </div>
                         <div class="form-group">
                             <label class="form-label" data-i18n="accounts.username">用户名</label>
@@ -820,6 +937,8 @@ HTML_CONTENT = """
                 'dashboard.realtimeLogs': '实时日志',
                 'accounts.title': '账号管理',
                 'accounts.school': '学校名称',
+                'accounts.schoolPlaceholder': '输入学校名称，例如：北京交通大学',
+                'accounts.schoolHint': '输入学校名称的一部分，从列表中选择完整名称',
                 'accounts.username': '用户名',
                 'accounts.password': '密码',
                 'accounts.add': '添加账号',
@@ -857,6 +976,8 @@ HTML_CONTENT = """
                 'dashboard.realtimeLogs': 'Realtime Logs',
                 'accounts.title': 'Account Management',
                 'accounts.school': 'School Name',
+                'accounts.schoolPlaceholder': 'Type part of a school name, e.g. Beijing Jiaotong',
+                'accounts.schoolHint': 'Type part of a school name and select the complete name',
                 'accounts.username': 'Username',
                 'accounts.password': 'Password',
                 'accounts.add': 'Add Account',
@@ -885,12 +1006,46 @@ HTML_CONTENT = """
 
         let currentLang = localStorage.getItem('lang') || 'zh';
         let ws = null;
+        let schoolNames = [];
+        let highlightedSchoolIndex = -1;
 
         document.addEventListener('DOMContentLoaded', function() {
             setLanguage(currentLang);
 
             document.getElementById('language-toggle').addEventListener('click', () => {
                 setLanguage(currentLang === 'zh' ? 'en' : 'zh');
+            });
+
+            const schoolInput = document.getElementById('tenant_name');
+            const schoolSuggestions = document.getElementById('school-suggestions');
+            schoolInput.addEventListener('focus', () => {
+                loadSchools();
+                renderSchoolSuggestions();
+            });
+            schoolInput.addEventListener('input', () => {
+                highlightedSchoolIndex = -1;
+                renderSchoolSuggestions();
+            });
+            schoolInput.addEventListener('keydown', (event) => {
+                const options = schoolSuggestions.querySelectorAll('.school-suggestion');
+                if (!schoolSuggestions.classList.contains('visible') || !options.length) return;
+                if (event.key === 'ArrowDown') {
+                    event.preventDefault();
+                    highlightedSchoolIndex = Math.min(highlightedSchoolIndex + 1, options.length - 1);
+                    updateHighlightedSchool();
+                } else if (event.key === 'ArrowUp') {
+                    event.preventDefault();
+                    highlightedSchoolIndex = Math.max(highlightedSchoolIndex - 1, 0);
+                    updateHighlightedSchool();
+                } else if (event.key === 'Enter' && highlightedSchoolIndex >= 0) {
+                    event.preventDefault();
+                    options[highlightedSchoolIndex].click();
+                } else if (event.key === 'Escape') {
+                    hideSchoolSuggestions();
+                }
+            });
+            document.addEventListener('click', (event) => {
+                if (!event.target.closest('.school-picker')) hideSchoolSuggestions();
             });
             
             document.querySelectorAll('.nav-item').forEach(item => {
@@ -999,6 +1154,11 @@ HTML_CONTENT = """
                 }
             });
 
+            document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+                const translation = i18n[lang][el.dataset.i18nPlaceholder];
+                if (translation) el.placeholder = translation;
+            });
+
             const languageToggle = document.getElementById('language-toggle');
             const nextLanguage = lang === 'zh' ? 'English' : '中文';
             languageToggle.title = `${lang === 'zh' ? '切换到' : 'Switch to'} ${nextLanguage}`;
@@ -1071,6 +1231,61 @@ HTML_CONTENT = """
             } catch (error) {
                 console.error('Failed to load accounts:', error);
             }
+        }
+
+        async function loadSchools() {
+            if (schoolNames.length) return;
+            try {
+                const response = await fetch('/api/schools');
+                const data = await response.json();
+                schoolNames = Array.isArray(data.schools) ? data.schools : [];
+                renderSchoolSuggestions();
+            } catch (error) {
+                console.error('Failed to load schools:', error);
+            }
+        }
+
+        function renderSchoolSuggestions() {
+            const input = document.getElementById('tenant_name');
+            const container = document.getElementById('school-suggestions');
+            const keyword = input.value.trim().toLowerCase();
+            const matches = schoolNames
+                .filter(name => !keyword || name.toLowerCase().includes(keyword))
+                .slice(0, 30);
+
+            container.innerHTML = '';
+            if (!matches.length || document.activeElement !== input) {
+                hideSchoolSuggestions();
+                return;
+            }
+
+            matches.forEach((school, index) => {
+                const option = document.createElement('button');
+                option.type = 'button';
+                option.className = 'school-suggestion';
+                option.setAttribute('role', 'option');
+                option.textContent = school;
+                option.addEventListener('mousedown', (event) => event.preventDefault());
+                option.addEventListener('click', () => {
+                    input.value = school;
+                    hideSchoolSuggestions();
+                    input.focus();
+                });
+                option.dataset.index = String(index);
+                container.appendChild(option);
+            });
+            container.classList.add('visible');
+            updateHighlightedSchool();
+        }
+
+        function updateHighlightedSchool() {
+            document.querySelectorAll('.school-suggestion').forEach((option, index) => {
+                option.classList.toggle('highlighted', index === highlightedSchoolIndex);
+            });
+        }
+
+        function hideSchoolSuggestions() {
+            document.getElementById('school-suggestions').classList.remove('visible');
         }
 
         async function deleteAccount(username, tenantName) {

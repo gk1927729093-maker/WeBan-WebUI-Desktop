@@ -13,6 +13,7 @@ WeBan WebUI provides a modern, dark-themed web interface for managing WeBan acco
 
 ### 👤 Account Management
 - Add new accounts with school name, username, and password
+- Search and select the complete school name from the official school list
 - View all configured accounts
 - Delete accounts individually
 - Duplicate detection
