@@ -34,3 +34,11 @@ win32-setctime==1.2.0 ; sys_platform == 'win32'
     # via loguru
 wrapt==2.3.0
     # via deprecated
+
+# WebUI dependencies
+fastapi>=0.110.0
+    # via webui
+uvicorn[standard]>=0.27.0
+    # via webui
+tomli-w>=1.0.0
+    # via webui
