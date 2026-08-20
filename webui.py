@@ -9,6 +9,7 @@ import threading
 import logging
 import asyncio
 import sys
+import shutil
 import time
 import urllib.request
 from collections import deque
@@ -54,6 +55,16 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _get_weban_python_command() -> list[str]:
+    """优先使用项目要求的 Python 3.12，避免 WebUI 与本体环境不一致。"""
+    if sys.version_info[:2] == (3, 12):
+        return [sys.executable]
+    launcher = shutil.which("py")
+    if launcher:
+        return [launcher, "-3.12"]
+    return [sys.executable]
+
+
 # ========== API 端点 ==========
 
 @app.get("/api/task/status")
@@ -90,9 +101,10 @@ async def start_task():
             }
 
         try:
+            python_command = _get_weban_python_command()
             task_process = subprocess.Popen(
                 [
-                    sys.executable,
+                    *python_command,
                     "-u",
                     MAIN_SCRIPT.name,
                     "--data-dir",

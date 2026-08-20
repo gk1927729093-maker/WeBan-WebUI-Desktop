@@ -38,7 +38,7 @@ WeBan WebUI provides a modern, dark-themed web interface for managing WeBan acco
 pip install -r requirements.txt
 ```
 
-Required packages:
+The WeBan runtime targets Python 3.12. Required packages:
 - `fastapi` - Web framework
 - `uvicorn[standard]` - ASGI server
 - `websockets` - Real-time communication
