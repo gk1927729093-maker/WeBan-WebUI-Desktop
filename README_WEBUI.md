@@ -1,253 +1,151 @@
-# WeBan WebUI Documentation
+# WeBan WebUI
 
-## Overview
-
-WeBan WebUI provides a modern, dark-themed web interface for managing WeBan accounts, controlling tasks, and monitoring logs in real-time.
+WeBan WebUI is a local web interface for the WeBan runtime. It uses an
+Apple-inspired light visual style and supports Chinese and English.
 
 ## Features
 
-### 🎯 Dashboard
-- **Task Control**: Start/stop main.py with one click
-- **Real-time Logs**: WebSocket-powered live log streaming
-- **Status Monitoring**: Visual task status indicators
+- Start and stop the real `main.py` process from the dashboard.
+- Stream task output through a WebSocket log panel.
+- Add, list, and delete accounts without changing unrelated config sections.
+- Load the official school list and filter it by typing a few characters.
+- Select the complete school name from the autocomplete suggestions.
+- Edit the main study and exam settings.
+- Use the interface on desktop or mobile layouts.
 
-### 👤 Account Management
-- Add new accounts with school name, username, and password
-- Search and select the complete school name from the official school list
-- View all configured accounts
-- Delete accounts individually
-- Duplicate detection
+## Requirements
 
-### ⚙️ Global Settings
-- Configure learning mode: `false`, `true`, or `force`
-- Configure exam mode: `false`, `true`, `perfect`, or `force`
-- Configure `max_workers`, study time, random answers, and video speed
-- Automatic `config.toml` persistence without dropping unknown settings
+The WeBan runtime targets Python 3.12:
 
-### 📋 Log Viewer
-- Browse all historical log files
-- View logs by account
-- Display file size and modification time
-- Open logs in new window
-
-## Installation
-
-### 1. Install Dependencies
-
-```bash
-pip install -r requirements.txt
+```text
+Python >= 3.12, < 3.13
 ```
 
-The WeBan runtime targets Python 3.12. Required packages:
-- `fastapi` - Web framework
-- `uvicorn[standard]` - ASGI server
-- `websockets` - Real-time communication
-- `tomli-w` - TOML file writing
-- `loguru` - Logging (already required by main.py)
-
-### 2. Verify Installation
+Install the dependencies with:
 
 ```bash
-python -c "import fastapi, uvicorn, tomli_w; print('All dependencies installed')"
+py -3.12 -m pip install -r requirements.txt
 ```
 
-## Usage
-
-### Start WebUI
+Verify the important packages:
 
 ```bash
-python webui.py
+py -3.12 -c "import fastapi, uvicorn, tomli_w, requests, pyaes, nodriver, cv2; print('dependencies ok')"
 ```
 
-Default: http://127.0.0.1:8080
+## Start
 
-The WebUI and `main.py` are in the same directory in this fork. The WebUI
-starts the real WeBan process with that directory as its working directory.
-The account section writes the format used by WeBan:
+On Windows, double-click `启动WebUI.bat` or run:
+
+```bash
+py -3.12 webui.py
+```
+
+Open:
+
+```text
+http://127.0.0.1:8080
+```
+
+The WebUI and `main.py` must remain in the same fork directory. The task
+controller starts the local `main.py` with `--data-dir` and
+`--non-interactive`, so the WebUI and the runtime use the same configuration
+and log directory.
+
+## Account Configuration
+
+The account form writes the format expected by WeBan:
 
 ```toml
 [[account]]
-tenant_name = "学校登录页显示的完整名称"
-username = "学号"
-password = "密码"
+tenant_name = "The complete school name shown by WeBan"
+username = "Your student number"
+password = "Your password"
 ```
 
-The school name is required and must exactly match the school/tenant name
-shown on the WeBan login page.
+The school name is required. Type part of the name, then select the complete
+name returned by the official WeBan school list. Do not use an abbreviation or
+an approximate name, because the runtime uses the exact tenant name to find
+the school code.
 
-### Custom Host/Port
+The existing `config.toml` is not overwritten during startup. Saving an
+account or setting uses an atomic temporary file and keeps unrelated TOML
+sections.
 
-```bash
-# Environment variables
-set WEBUI_HOST=0.0.0.0
-set WEBUI_PORT=9000
-python webui.py
+## Custom Data Directory
+
+Set `WB_DATA_DIR` when configuration and logs should live outside the source
+directory:
+
+```powershell
+$env:WB_DATA_DIR = "D:\WeBanData"
+py -3.12 webui.py
 ```
 
-### Custom Data Directory
+The WebUI still starts the local `main.py`; only `config.toml` and `logs` move
+to the selected data directory.
 
-```bash
-set WB_DATA_DIR=D:\custom\path
-python webui.py
+## Host and Port
+
+The defaults are localhost and port 8080. Override them with:
+
+```powershell
+$env:WEBUI_HOST = "127.0.0.1"
+$env:WEBUI_PORT = "8081"
+py -3.12 webui.py
 ```
 
-`WB_DATA_DIR` stores `config.toml` and `logs` in the selected directory while
-the WebUI still starts the local `main.py`.
+The default localhost binding is intentional because passwords are stored in
+`config.toml` as plain text and the WebUI has no built-in authentication.
 
-## Architecture
+## API
 
-### Single-File Design
-
-`webui.py` contains:
-- FastAPI backend with all API endpoints
-- Embedded HTML/CSS/JS frontend
-- WebSocket handler for real-time logs
-- Task process management
-- TOML configuration handling
-
-### API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | GET | Serve web interface |
-| `/api/config` | GET | Get full configuration |
-| `/api/config` | POST | Update configuration |
-| `/api/accounts` | GET | List all accounts |
-| `/api/accounts` | POST | Add new account |
-| `/api/accounts/{username}` | DELETE | Delete account |
-| `/api/settings` | GET | Get global settings |
-| `/api/settings` | POST | Update settings |
-| `/api/task/status` | GET | Get task running status |
-| `/api/task/start` | POST | Start main.py |
-| `/api/task/stop` | POST | Stop main.py |
-| `/api/logs` | GET | List all log files |
-| `/api/logs/{account}/{filename}` | GET | Get log content |
-| `/ws/logs` | WebSocket | Real-time log streaming |
-
-### Configuration Management
-
-- Uses Python 3.11+ `tomllib` for reading TOML
-- Uses `tomli-w` for writing TOML
-- Preserves all config.toml structure
-- Atomic file writes
-
-### Task Management
-
-- Launches main.py as subprocess
-- Captures stdout/stderr
-- Streams logs to WebSocket clients
-- Graceful shutdown with 5s timeout
-- Force kill if necessary
-
-## UI Features
-
-### Design System
-
-- **Dark Theme**: Deep navy base (#0A0D12, #0F172A)
-- **Accent Colors**: Cyan (#38BDF8) for interactive elements
-- **Typography**: Inter font family
-- **Components**: Modern cards with 8-12px radius
-- **Responsive**: Mobile-friendly layout
-
-### Navigation
-
-- Sidebar navigation with active state
-- Four main sections
-- Smooth page transitions
-
-### Real-time Updates
-
-- WebSocket connection for live logs
-- 2-second polling for task status
-- Auto-scroll log container
-- Color-coded log levels (error/success/warning)
+| Endpoint | Method | Purpose |
+| --- | --- | --- |
+| `/` | GET | Serve the WebUI |
+| `/api/task/status` | GET | Read task status |
+| `/api/task/start` | POST | Start the real `main.py` |
+| `/api/task/stop` | POST | Stop the task process |
+| `/api/accounts` | GET | List configured accounts |
+| `/api/accounts` | POST | Add an account |
+| `/api/accounts/{username}` | DELETE | Delete an account |
+| `/api/schools` | GET | Load the official autocomplete list |
+| `/api/settings` | GET | Read global settings |
+| `/api/settings` | POST | Save global settings |
+| `/api/logs` | GET | List historical log files |
+| `/ws/logs` | WebSocket | Stream task output |
 
 ## Troubleshooting
 
-### Port Already in Use
+### The WebUI does not start
 
-```bash
-# Use different port
-set WEBUI_PORT=8081
-python webui.py
+Use Python 3.12 explicitly. Python 3.14 is not supported by the project
+metadata and may fail when importing `nodriver`.
+
+```powershell
+py -3.12 webui.py
 ```
 
-### Cannot Find main.py
+### The page looks unchanged
 
-Ensure `main.py` exists in the same directory as `webui.py`, or set `WB_DATA_DIR`:
+Refresh `http://127.0.0.1:8080/` after restarting the server. A running
+Python process does not reload `webui.py` automatically.
 
-```bash
-set WB_DATA_DIR=D:\Documents\ChatGPT\WeBan-webui-main
-python webui.py
+### The school list is unavailable
+
+The WebUI uses the official school endpoint and falls back to school names
+already present in the local configuration if the endpoint is temporarily
+unavailable.
+
+### The task refuses to start
+
+Save at least one account with a complete school name, username, and password.
+The WebUI refuses to start `main.py` when no valid account is configured.
+
+## Development Checks
+
+```powershell
+py -3.12 -m compileall -q webui.py
+py -3.12 main.py --help
+git diff --check
 ```
-
-### WebSocket Connection Failed
-
-- Check browser console for errors
-- Ensure no firewall blocking WebSocket
-- Try refreshing the page
-
-### Config Not Saving
-
-- Check file permissions on config.toml
-- Verify TOML syntax is valid
-- Check logs for detailed error messages
-
-## Development
-
-### Adding New Features
-
-1. **Backend**: Add endpoint in `webui.py` before HTML_TEMPLATE
-2. **Frontend**: Add JavaScript function in `<script>` section
-3. **UI**: Add HTML elements in appropriate page section
-
-### Testing
-
-```bash
-# Test config handling
-python -c "from webui import load_config, save_config; print(load_config())"
-
-# Test FastAPI routes
-python -c "from webui import app; print([r.path for r in app.routes])"
-```
-
-### Log Locations
-
-- WebUI logs: Console output from uvicorn
-- Task logs: `logs/{account}/` directory
-- Main application logs: Handled by main.py's loguru setup
-
-## Security Notes
-
-### Default Configuration
-
-- Binds to `127.0.0.1` (localhost only)
-- No authentication built-in
-- Suitable for local development
-
-### Production Deployment
-
-If exposing to network:
-
-1. **Add authentication** (JWT, OAuth, or basic auth)
-2. **Use HTTPS** (reverse proxy with nginx/Caddy)
-3. **Firewall rules** to restrict access
-4. **Rate limiting** on API endpoints
-
-### Sensitive Data
-
-- Passwords stored in config.toml (plain text)
-- Logs may contain sensitive information
-- Consider encrypting config.toml at rest
-
-## License
-
-Same license as WeBan main project.
-
-## Support
-
-For issues or questions:
-1. Check this documentation
-2. Review console logs
-3. Check main.py compatibility
-4. Verify all dependencies installed
