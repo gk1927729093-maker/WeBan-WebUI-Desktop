@@ -1,286 +1,106 @@
-# _WeBan_ 安全微课 安全微伴 大学安全教育
+# WeBan WebUI Desktop
 
-## 介绍
+基于 [wu-xiao-ya/WeBan-webui](https://github.com/wu-xiao-ya/WeBan-webui) 修改的多账号 WebUI 与 Windows 安装版。面向本机使用，增加持续队列、批量导入、按账号查看日志、实时章节进度、完成归档和独立 MSI 安装包。
 
-如果本项目帮到了你，可以在右上角点亮 Star，谢谢你！
+## 项目来源与开源许可
 
-实现了课程学习和根据题库自动考试，支持多用户多线程运行，自动验证码识别等。
+本项目直接基于 **wu-xiao-ya/WeBan-webui** 的提交 [`fe844a8`](https://github.com/wu-xiao-ya/WeBan-webui/commit/fe844a893f3e2f80522a74717184fbecb26f13a6) 修改。该项目的底层运行程序来自 **[hangone/WeBan](https://github.com/hangone/WeBan)**。
 
-运行前后会自动合并题库，如果一次没满分可以再考一次。可将 `answer/answer.json` 文件提交 PR 一起完善题库。
+课程处理、考试、题库同步、验证码处理等基础能力来自上游，本项目不将这些能力声明为原创。本次修改主要围绕 WebUI 的多账号管理、状态核验、进度展示和 Windows 部署。具体对照见 [UPSTREAM.md](UPSTREAM.md)，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
-## 功能特性
+保留上游 [GNU GPL v3 许可证](LICENSE)，继续以相同许可证提供本项目的修改代码。感谢两个上游项目及其贡献者。本项目不是课程平台官方软件。
 
-- **课程学习**：自动遍历项目 → 分类 → 课程，模拟翻页、答题、等待学习时长后完课；按项目交替完成课程与考试
-- **自动考试**：基于题库自动答题，支持单选/多选，未匹配题目可随机作答或手动输入
-- **验证码识别**：登录滑块验证码自动识别；课程点选验证码自动识别（OpenCV，2 轮 × 3 次），失败才转手动
-- **多账号并发**：支持配置多个账号，可多线程同时执行
-- **题库同步**：考试前后自动从服务器同步题库，支持多用户共享
-- **断点续考**：追求满分模式下，一次未满分可再次考试
-- **进度监控**：完课后自动检查进度是否更新，未更新则警告提示
-- **调试模式**：开启 `debug` 可查看完整请求/响应日志
-- **无交互运行**：Docker / cron / 后台环境自动无交互，数据目录持久化
-- **低配兼容**：numpy 1.26 + OpenCV 4.10 锁定，兼容无 AVX2 的 QEMU 虚拟 CPU（便宜 1H1G 云服务器可跑）
+## 下载 Windows 安装包
 
-## 使用
+前往 [Releases](https://github.com/gk1927729093-maker/WeBan-WebUI-Desktop/releases/latest) 下载：
 
-> **零基础三步上手**：① 下载二进制文件 → ② 双击/命令行运行 → ③ 输入学校、学号、密码。不需要安装 Python，不需要写代码。
+- `WeBan-WebUI-1.0.0-x64.msi`：Windows 10/11 64 位安装包，约 52 MiB。
+- 同名 `.sha256` 文件：安装包完整性校验。
+- `INSTALL.zh-CN.txt`：安装与数据目录说明。
 
-### ⭐ 快速开始（推荐：下载即用）
+安装包内置 Python 3.12 和应用依赖，不需要另外安装 Python。平台相关功能还需要联网，并使用电脑上已有的 Microsoft Edge 或 Google Chrome。当前安装包未做代码签名，Windows 可能显示发布者未知。
 
-**第 1 步：下载你的系统对应的文件**
+安装后通过桌面的 **WeBan WebUI（安装版）** 或开始菜单打开。开始菜单还提供“停止 WeBan WebUI”和“打开账号数据目录”。重复打开不会重复创建后台。
 
-点这里打开最新版下载页 → [**Releases**](https://github.com/hangone/WeBan/releases/latest)，按自己的电脑系统下载（不确定系统就按下面的表选）：
+| 项目 | 安装版行为 |
+| --- | --- |
+| 安装范围 | 当前 Windows 用户 |
+| 默认程序位置 | `%LOCALAPPDATA%\Programs\WeBan WebUI`，可在向导中修改 |
+| 账号、进度、题库和日志 | `%LOCALAPPDATA%\WeBanWebUI\Data` |
+| 本机端口 | 默认 8088，被占用时在 8089–8097 内选择 |
+| 卸载 | 停止安装版后台并移除程序，保留用户数据 |
+| 发布内容 | 不包含维护者的账号、密码、Token、API Key、运行日志和完成记录 |
 
-| 你的电脑 | 点击下载（GitHub） | 下载太慢用镜像 |
-|---------|-------------------|---------------|
-| Windows（绝大多数电脑） | [WeBan-windows-x64.exe](https://github.com/hangone/WeBan/releases/latest/download/WeBan-windows-x64.exe) | [镜像](https://gh-proxy.com/https://github.com/hangone/WeBan/releases/latest/download/WeBan-windows-x64.exe) |
-| Mac 苹果电脑（Intel 芯片） | [WeBan-macos-x64](https://github.com/hangone/WeBan/releases/latest/download/WeBan-macos-x64) | [镜像](https://gh-proxy.com/https://github.com/hangone/WeBan/releases/latest/download/WeBan-macos-x64) |
-| Mac 苹果电脑（M1/M2/M3/M4 芯片） | [WeBan-macos-arm64](https://github.com/hangone/WeBan/releases/latest/download/WeBan-macos-arm64) | [镜像](https://gh-proxy.com/https://github.com/hangone/WeBan/releases/latest/download/WeBan-macos-arm64) |
-| Linux（Ubuntu/Debian/CentOS，64 位） | [WeBan-linux-x64](https://github.com/hangone/WeBan/releases/latest/download/WeBan-linux-x64) | [镜像](https://gh-proxy.com/https://github.com/hangone/WeBan/releases/latest/download/WeBan-linux-x64) |
-| Linux（树莓派/ARM 服务器） | [WeBan-linux-arm64](https://github.com/hangone/WeBan/releases/latest/download/WeBan-linux-arm64) | [镜像](https://gh-proxy.com/https://github.com/hangone/WeBan/releases/latest/download/WeBan-linux-arm64) |
+关闭网页不会停止后台，暂时不用时请使用开始菜单的停止入口。
 
-> **Mac 怎么判断芯片**：屏幕左上角  → 关于本机，看"芯片"一栏写的是 Apple M 系列（arm64）还是 Intel（x64）。Windows 不确定就选 x64（2010 年后几乎都是）。
+## 本次新增与修复
 
-**第 2 步：运行**
+| 功能 | 修改后的行为 |
+| --- | --- |
+| 批量导入 | 支持 CSV、TXT、TSV，以及从 Excel 直接粘贴两列；可按行指定学校，重复账号跳过并报告格式错误行 |
+| 持续队列 | 运行中新增账号会自动接入，有空余名额就开始；不会重启其他账号 |
+| 并发设置 | 默认 5，可设置 1–50；超过并发数的账号排队 |
+| 默认跳过完成账号 | 停止、重启或重开任务后保留已完成状态，只重新处理未完成账号 |
+| 完成状态核验 | 按最终服务端课程与考试结果判断完成，普通模式按及格判定；保留已经恢复的错误日志 |
+| 账号日志 | 实时日志和历史日志均可按账号筛选；不同学校的相同学号分别记录 |
+| 最终成绩 | 完成账号显示最终考试分数；多个考试分别展示 |
+| 实时章节进度 | 查看项目、章节和每节课程的状态，约 10 秒同步，可暂停、手动刷新及仅显示未完成课程 |
+| 运行状态分组 | 章节页分为“运行中”和“未运行”，显示数量，随任务状态自动更新 |
+| 完成归档 | 完成超过 24 小时的进度移到独立归档页；24 小时内完成的暂留控制台；保留成绩、章节和日志入口 |
+| 查询与学习协调 | 查询运行中账号时复用登录 Token，使用独立只读会话，不重新登录该账号 |
+| AI 异常处理 | 区分模型不可用、鉴权失败、额度耗尽与临时错误；AI 请求不携带学习平台 Cookie/Token |
+| Windows MSI | 中文安装向导、内置运行环境、开始菜单和桌面快捷方式、标准卸载、自定义安装路径记忆 |
 
-- **Windows**：双击 `WeBan-windows-x64.exe`（第一次运行如被 SmartScreen 拦截，点"更多信息" → "仍要运行"；杀毒软件误报请添加信任）
-- **Mac**：双击文件，系统提示"无法验证开发者"时，打开 **系统设置 → 隐私与安全性**，点"仍要打开"；或在终端运行：
-  ```bash
-  chmod +x WeBan-macos-*
-  ./WeBan-macos-arm64   # Intel 芯片换成 WeBan-macos-x64
-  ```
-- **Linux**：
-  ```bash
-  chmod +x WeBan-linux-*
-  ./WeBan-linux-x64     # ARM 服务器换成 WeBan-linux-arm64
-  ```
+这些修改不会扩展为无限并发。当前队列实现的上限是 50，100–500 个账号的稳定并发未经过实际压力测试。
 
-**第 3 步：填账号，开始**
+## 批量导入示例
 
-第一次运行（或还没有配置文件时），程序会**直接让你输入学校、学号、密码**（不用编辑任何文件）：
+在“账号管理”先填写默认学校，再粘贴：
 
-```
-请输入账号信息：
-  学校全称（如：北京交通大学-本科生）: 北京交通大学-本科生
-  用户名（学号）: 26551063
-  密码（默认同用户名）: 26551063
+```csv
+学号,密码
+示例账号A,示例密码A
+示例账号B,示例密码B
 ```
 
-输入后程序会**自动验证账号**：登录成功就会把账号自动保存到配置文件 `config.toml`，然后开始学习和考试；**如果学校全称或用户名密码错了，会提示你重新输入，不会写坏配置文件**。之后每次运行都会接着上次的进度继续。
+也可每行使用 `学校,学号,密码` 混合导入不同学校。学校名称需要与平台一致。密码留空会按程序约定使用学号；导入时请确认自己的输入。
 
-> 配置文件 `config.toml` 在程序旁边（Windows 是 exe 所在文件夹，Mac/Linux 是运行命令的目录），下次运行前也可以手动改它。用 `--data-dir` 可以指定固定位置（见下方参数表）。
+## 从源码运行
 
-**不想交互输入？一条命令直接跑**（学校/学号/密码写在命令里，无需配置文件）：
+需要 Python `>=3.12,<3.13`。在项目目录中执行：
 
-```bash
-# Windows (PowerShell)
-$env:WB_TENANT_NAME="你的学校全称"; $env:WB_USERNAME="你的学号"; $env:WB_PASSWORD="你的密码"; .\WeBan-windows-x64.exe
-
-# mac / Linux
-WB_TENANT_NAME="你的学校全称" WB_USERNAME=你的学号 WB_PASSWORD=你的密码 ./WeBan-macos-arm64
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r installer\requirements-installed.txt
+Copy-Item config.example.toml config.toml
+.\start_webui.bat
 ```
 
-> 全部参数对照表见下方"参数总览"；账号想保密的、或一个文件管理多个账号的，用配置文件方式。
+已有 `config.toml` 时保留自己的配置，首次使用才复制示例。源码部署默认打开 `http://127.0.0.1:8080`，停止使用 `stop_webui.bat`。
 
-### 参数总览
+更多操作见 [使用说明.txt](使用说明.txt)。安装版与源码版使用独立的数据位置；安装包不会自动导入其他部署中的账号。
 
-**每个配置项都有命令行参数和环境变量两种方式，三类名称一一对应**：配置文件键名（`snake_case`）= 命令行参数（`--kebab-case`）= 环境变量（`WB_SNAKE_CASE`），例如 `study_time` ↔ `--study-time` ↔ `WB_STUDY_TIME`。优先级均为 **命令行 > 环境变量 > 配置文件**：
+## 测试与构建
 
-| 配置文件键 | 参数 | 环境变量 | 说明 |
-|-----------|------|---------|------|
-| — | `--config PATH` | `WB_CONFIG` | 配置文件路径（默认: 程序目录/config.toml） |
-| — | `--data-dir PATH` | `WB_DATA_DIR` | 数据目录（config/logs/answer 都在此，适合挂载） |
-| — | `--non-interactive` | — | 无交互模式（环境变量用 `ENVIRONMENT=docker`/`container` 或 stdin 非 TTY 自动判定） |
-| `study_mode` | `--study-mode` | `WB_STUDY_MODE` | 学习模式（`false`/`true`/`force`） |
-| `exam_mode` | `--exam-mode` | `WB_EXAM_MODE` | 考试模式（`false`/`true`/`perfect`/`force`） |
-| `random_answer` | `--random-answer` | `WB_RANDOM_ANSWER` | 题库外题目是否随机作答（`true`/`false`） |
-| `study_time` | `--study-time SEC` | `WB_STUDY_TIME` | 每门课学习时长 `"基础,随机上限"`（秒），如 `"20,5"` |
-| `video_speed` | `--video-speed N` | `WB_VIDEO_SPEED` | 视频课程倍速：`0`=不按视频时长等待、`1`=原速、`2`=半速 |
-| `exam_question_time` | `--exam-question-time SEC` | `WB_EXAM_QUESTION_TIME` | 每道考试题答题等待时长 `"基础,随机上限"`（秒） |
-| `exam_submit_match_rate` | `--exam-submit-match-rate N` | `WB_EXAM_SUBMIT_MATCH_RATE` | 允许交卷的最低题库匹配率（百分比） |
-| `browser_path` | `--browser-path PATH` | `WB_BROWSER_PATH` | 浏览器可执行文件路径 |
-| `cdp_host` | `--cdp-host HOST` | `WB_CDP_HOST` | CDP 浏览器地址 |
-| `cdp_port` | `--cdp-port PORT` | `WB_CDP_PORT` | CDP 浏览器端口 |
-| `jupiter_fallback` | `--jupiter-fallback` | `WB_JUPITER_FALLBACK` | 对未加载 apicenext.js 的课程是否补发 jupiter 翻页轨迹 |
-| `max_workers` | `--max-workers N` | `WB_MAX_WORKERS` | 多账号最大并发数 |
-| `debug` | `--debug` | `WB_DEBUG` | 启用调试日志 |
-| `tenant_name` | `--tenant-name NAME` | `WB_TENANT_NAME` | 单账号学校全称（免配置文件） |
-| `username` | `--username USER` | `WB_USERNAME` | 单账号用户名 |
-| `password` | `--password PASS` | `WB_PASSWORD` | 单账号密码（默认同用户名） |
-| `user_id` | `--user-id ID` | `WB_USER_ID` | 单账号用户 ID（Token 登录） |
-| `token` | `--token TOKEN` | `WB_TOKEN` | 单账号登录 Token（配合 `--tenant-name --user-id`） |
-| `[ai].enable` | `--ai-enable` | `WB_AI_ENABLE` | 是否启用 AI 搜题（`true`/`false`） |
-| `[ai].base_url` | `--ai-base-url URL` | `WB_AI_BASE_URL` | AI 服务 API 基础路径 |
-| `[ai].api_key` | `--ai-api-key KEY` | `WB_AI_API_KEY` | AI 服务 API Key |
-| `[ai].model` | `--ai-model NAME` | `WB_AI_MODEL` | AI 模型名称 |
-| `[ai].timeout` | `--ai-timeout SEC` | `WB_AI_TIMEOUT` | AI 请求超时秒数 |
-| `[ai].max_retries` | `--ai-max-retries N` | `WB_AI_MAX_RETRIES` | AI 请求失败最大重试次数 |
+Python 测试使用模拟账号，不登录真实学习平台：
 
-无交互自动判定：`ENVIRONMENT=docker`（或 container）、stdin 非 TTY（cron/后台/管道）、或显式 `--non-interactive`。
-
-**完全不写 config.toml 也能运行**（单账号 + 全部设置走 CLI/env）：
-
-```bash
-# 环境变量
-WB_TENANT_NAME="你的学校全称" WB_USERNAME=你的学号 WB_PASSWORD=你的密码 \
-WB_STUDY_TIME="20,5" WB_VIDEO_SPEED=0 ./WeBan-macos-arm64
-# 或等价的命令行参数
-./WeBan-macos-arm64 --tenant-name "你的学校全称" --username 你的学号 \
-  --study-time "20,5" --video-speed 0
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+node --test tests/test_archive_progress.js tests/test_chapter_groups.js
 ```
 
-### 源码运行
+本地构建 MSI：
 
-不需要代码基础的用户**跳过本节**（直接下载二进制即可）。开发者/想改代码时用：
-
-1. 安装 Python 3（建议使用 [uv](https://github.com/astral-sh/uv)）和 Git
-
-2. 克隆本仓库
-
-```bash
-git clone --depth 1 https://github.com/hangone/WeBan
+```powershell
+.\.venv\Scripts\python.exe installer\build_msi.py
 ```
 
-3. 安装依赖
+构建流程与依赖来源见 [installer/README.md](installer/README.md)。GitHub Actions 中的验证流程会运行测试；Windows MSI 构建可手动触发，产物保存为 Actions artifact。
 
-```bash
-pip install -r requirements.txt # 或 uv sync
-```
+首个 Windows MSI 已在本机验证自定义目录安装、独立运行环境加载、启动、重复启动、停止和卸载。卸载后会保留用户数据。其他电脑与平台的兼容性仍需使用者反馈。
 
-4. 运行
+## 数据与安全
 
-```bash
-python main.py # 或 uv run main.py
-```
+账号配置和 API Key 保存在本机文件中，配置文件不是加密保险箱。界面默认只监听 `127.0.0.1`，没有内置登录鉴权，不适合直接暴露到公网。
 
-运行 `python main.py --help` 可查看全部参数。
-
-### Docker
-
-提供两种镜像变体（多架构 amd64/arm64，发布时随版本推送）：
-
-| 镜像 | Tag | 说明 |
-|------|-----|------|
-| 内置浏览器 | `latest` / `with-browser` / `<版本号>` | 内置 headless Chrome，开箱即用 |
-| 轻量镜像 | `without-browser` / `<版本号>-without-browser` | 通过 CDP 连接宿主机浏览器 |
-
-容器默认无交互运行（`ENVIRONMENT=docker` 自动判定），数据全部持久化在 `/app/data`：
-
-```bash
-mkdir -p data
-docker run --rm \
-  -v "$PWD/data":/app/data \
-  --cpus 1 \
-  hangyi/weban:latest
-```
-
-- 建议 `--cpus 1`（详见下方"CPU 配额与验证码"）；首次运行会在 `./data/` 生成 `config.toml` 模板，填写账号后重新运行即可
-- 日志在 `./data/logs/<账号>/`，题库在 `./data/answer/`，全部挂载持久化
-- 无交互：不弹编辑器、确认用默认值、验证码自动识别失败不等待手动输入（跳过该课）、末尾不等待回车
-- 需要交互（如手动输验证码）时用 `docker run -it`（容器检测到 TTY 自动进入交互模式）
-
-所有配置项均可覆盖（命令行参数 > 环境变量 > 配置文件，名称一一对应，见上方参数表）。示例：
-
-```bash
-# 环境变量（单账号免配置文件）
-docker run --rm -v "$PWD/data":/app/data --cpus 1 \
-  -e WB_TENANT_NAME="你的学校全称" -e WB_USERNAME=你的学号 -e WB_PASSWORD=你的密码 \
-  -e WB_STUDY_TIME="20,5" -e WB_VIDEO_SPEED=0 \
-  hangyi/weban:latest
-
-# 命令行参数（经 entrypoint 透传）
-docker run --rm -v "$PWD/data":/app/data --cpus 1 \
-  hangyi/weban:latest --tenant-name "你的学校全称" --username 你的学号 \
-  --study-time "20,5" --video-speed 0
-```
-
-#### CPU 配额与验证码
-
-- **docker 下多核正常**：实测（docker 29.x，2 核 1.9GB）`--cpus 1` / `--cpus 2` × 单进程/多进程全部跑通，真实课程点选验证码在 `--cpus 2` 下完整通过（识别 → 点击 → 提交 → 腾讯 SDK 回调成功），无挂起
-- 建议 `--cpus 1`：镜像默认单进程 + 单线程识别（`WB_SINGLE_PROCESS` / `WB_CV_THREADS`），1 核即可跑通全部验证码；多核配额没有性能收益（Chrome 单进程受单核限制），1.9GB 小内存机器用 2 核反而容易内存吃紧
-- **podman 已知特例**：podman（如 `podman run --cpus 2`）下 headless-shell 点选验证码**提交后可能挂起**（CDP evaluate 无响应 60s+，1 核正常）——这是 podman 的 CPU 配额调度问题，非程序缺陷；podman 部署请用 `--cpus 1`
-
-#### 轻量镜像（CDP 连接宿主机浏览器）
-
-容器会自动检测 Docker 环境并尝试连接宿主机的 Chrome，无需手动配置 CDP。
-
-**第一步：在宿主机启动 Chrome 远程调试**
-
-打开 Chrome，地址栏输入 `chrome://inspect/#remote-debugging`，勾选 **Allow remote debugging for this browser instance**。
-
-或者直接命令行启动带远程调试的 Chrome：
-
-```bash
-# macOS
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222
-
-# Linux
-google-chrome --remote-debugging-port=9222
-
-# Windows
-"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
-```
-
-> 参考：[Chrome DevTools: Debug your browser session](https://developer.chrome.com/blog/chrome-devtools-mcp-debug-your-browser-session)
-
-**第二步：运行容器**
-
-```bash
-mkdir -p data
-docker run --rm \
-  -v "$PWD/data":/app/data \
-  hangyi/weban:without-browser
-```
-
-如需自定义 CDP 地址，可用 `--cdp-host` / `--cdp-port` 参数或配置文件 `cdp_host` / `cdp_port`。
-
-### 浏览器检测
-
-程序按以下优先级自动检测可用的浏览器，无需手动配置：
-
-1. **用户指定**：配置文件 `browser_path`（或 `--browser-path` / `WB_BROWSER_PATH`）
-2. **CDP 远程调试**：配置文件 `cdp_host` + `cdp_port`（或 CLI/env），或 Docker 环境下自动尝试 `host.docker.internal:9222`
-3. **Playwright 浏览器**：自动查找 `~/.cache/ms-playwright` 下的 Chromium
-4. **系统浏览器**：自动查找已安装的 Chrome / Chromium / Edge
-
-## 演示
-
-![study](images/study.png)
-![exam](images/exam.png)
-![old](images/old.png)
-
-## 常见问题
-
-- ### 部分无法直接登录的学校/Token 登录方法
-
-有些从迎新系统跳转的可以试试账号密码都是学号，也可以尝试使用 Token 登录，在电脑浏览器登录后按 F12 或者 Ctrl+Shift+I 打开开发者工具，找到本地存储，复制 user 的内容到 config.json 配置文件
-
-![chrome](images/chrome.png)
-![firefox](images/firefox.png)
-
-- ### 学习
-
-1. 学习时长太低不会计入进度
-2. 课程点选验证码会自动识别（无头浏览器 + OpenCV，最多 2 轮 × 3 次，可用 WB_CAPTCHA_ROUNDS/WB_CAPTCHA_ATTEMPTS 调整），失败后在交互模式会打开浏览器手动操作，无交互模式（Docker 等）会跳过该课程并告警
-3. 学习进度不更新可能是被风控，遇到了需要验证码的课程，请去网页上完成一次后重试
-
-- ### 考试
-
-1. 考试前有腾讯无感验证码，自动处理（headless 浏览器）
-2. 据观察，考试未提交是不会消耗考试次数的
-
-## 鸣谢
-
-- [Coaixy/weiban-tool](https://github.com/Coaixy/weiban-tool) 提供题库和一些代码思路
-- [pooneyy/WeibanQuestionsBank](https://github.com/pooneyy/WeibanQuestionsBank) 提供题库
-
-## 其他
-
-1. 本项目仅供学习交流使用，请勿用于商业用途。
-2. 欢迎 Star 喵，欢迎 PR 喵。
-3. 截图时注意打码个人信息。
-4. **如果看不懂上面说的也可以直接扫码备注学校和账号密码（留言微信号），乐意效劳。**
-
-   |             微信             |            支付宝            |
-   | :--------------------------: | :--------------------------: |
-   | ![wechat](images/wechat.png) | ![alipay](images/alipay.png) |
+提交 Issue 或分享文件前，请移除账号、密码、Token、API Key、姓名和学号。不要上传实际配置或整个数据目录。相关说明见 [SECURITY.md](SECURITY.md)。

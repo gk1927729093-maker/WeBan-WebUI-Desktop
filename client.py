@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 import webbrowser
+import requests
 from random import randint
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -255,6 +256,7 @@ class WeBanClient:
         self.cdp_port = cdp_port
         self.ai_config = ai_config
         self._ai_key_warned = False  # api_key 未配置提醒只打一次
+        self._ai_disabled_reason = ''
         if user and all([user.get("userId"), user.get("token")]):
             self.api = WeBanAPI(user=user, debug=debug, log=log)
         elif all([self.tenant_name, account, password]):
@@ -269,6 +271,8 @@ class WeBanClient:
         else:
             raise ValueError("学校代码获取失败，请检查学校全称是否正确")
         self._captcha_handler = None
+        self._cycle_projects: list[dict] = []
+        self._project_load_failed = False
 
     # ---- properties / helpers ------------------------------------------------
 
@@ -649,12 +653,14 @@ class WeBanClient:
         """获取账号全部进行中的项目列表（含实验室课程合并）"""
         my_project = self.api.list_my_project()
         if not _check_code_ok(my_project):
+            self._project_load_failed = True
             self.log.error(f"获取任务列表失败：{my_project}")
             return []
         my_project = my_project.get("data", [])
 
         completion = self.api.list_completion()
         if not _check_code_ok(completion):
+            self._project_load_failed = True
             self.log.error(f"获取模块完成情况失败：{completion}")
         else:
             showable_modules = [
@@ -664,6 +670,7 @@ class WeBanClient:
                 self.log.info("加载实验室课程")
                 lab_project = self.api.lab_index()
                 if not _check_code_ok(lab_project):
+                    self._project_load_failed = True
                     self.log.error(f"获取实验室课程失败：{lab_project}")
                 current = lab_project.get("data", {}).get("current") or {}
                 if current:
@@ -704,6 +711,7 @@ class WeBanClient:
             self.log.info(f"考试模式: {mode_desc}")
 
         projects = self._get_project_list()
+        self._cycle_projects = list(projects)
         if not projects:
             self.log.warning("当前没有进行中的项目。")
             return
@@ -725,6 +733,61 @@ class WeBanClient:
                     exam_submit_match_rate=exam_submit_match_rate,
                     only_project=project,
                 )
+
+    def check_cycle_completion(self, study_mode: str, exam_mode: str) -> dict:
+        """以最终服务端进度核验本轮结果，已恢复的中间错误不阻止完成。"""
+        pending = []
+        exam_scores = []
+        if self._project_load_failed:
+            return {'complete': False, 'message': '项目列表获取失败，暂时无法确认完成。'}
+        for project in self._cycle_projects:
+            name = project.get('projectName', '学习项目')
+            project_id = project.get('userProjectId')
+            if not project_id:
+                pending.append(f'{name} 缺少项目标识。')
+                continue
+            result = self.api.show_progress(project_id)
+            if not _check_code_ok(result):
+                pending.append(f'{name} 无法获取最终进度。')
+                continue
+            data = result.get('data') or {}
+            targets = []
+            if study_mode != 'false':
+                targets.extend([('必修课', 'requiredNum', 'requiredFinishedNum'),
+                                ('推送课', 'pushNum', 'pushFinishedNum'),
+                                ('自选课', 'optionalNum', 'optionalFinishedNum')])
+            if exam_mode != 'false':
+                targets.append(('考试', 'examNum', 'examFinishedNum'))
+            for label, total_key, done_key in targets:
+                if total_key not in data or done_key not in data:
+                    pending.append(f'{name} 缺少{label}进度。')
+                elif int(data[done_key] or 0) < int(data[total_key] or 0):
+                    pending.append(f'{name} {label}完成 {data[done_key]}/{data[total_key]}。')
+            if exam_mode != 'false' and int(data.get('examNum') or 0) > 0:
+                plans = self.api.exam_list_plan(project_id)
+                if not _check_code_ok(plans):
+                    pending.append(f'{name} 无法确认考试成绩。')
+                elif not plans.get('data'):
+                    pending.append(f'{name} 缺少考试成绩记录。')
+                else:
+                    for plan in plans.get('data') or []:
+                        score = float(plan.get('examScore') or 0)
+                        exam_name = plan.get('examPlanName', '考试')
+                        exam_scores.append({'project_name': name, 'exam_name': exam_name,
+                                            'score': score,
+                                            'full_score': float(plan.get('paperScore') or plan.get('fullScore') or 100),
+                                            'pass_score': plan.get('passScore'),
+                                            'taken': int(plan.get('examFinishNum') or data.get('examFinishedNum') or 0) > 0})
+                        if exam_mode == 'perfect':
+                            target = float(plan.get('paperScore') or plan.get('fullScore') or 100)
+                            if score < target:
+                                pending.append(f'{name} {exam_name}尚未达到满分目标。')
+                        elif plan.get('passScore') is None:
+                            pending.append(f'{name} {exam_name}缺少及格线，无法核实是否及格。')
+                        elif score < float(plan['passScore']):
+                            pending.append(f"{name} {exam_name}成绩 {score:g}，未达到及格线 {plan['passScore']}。")
+        return {'complete': not pending, 'message': '已完成。' if not pending else ' '.join(pending)[:600],
+                'exam_scores': exam_scores}
 
     # ---- study --------------------------------------------------------------
 
@@ -2067,6 +2130,8 @@ jupiter_fallback=true 时也补翻页轨迹。再答题，最后完课。
         """
         if not self.ai_config or not self.ai_config.get("enable"):
             return []
+        if getattr(self, '_ai_disabled_reason', ''):
+            return []
 
         api_key = self.ai_config.get("api_key", "").strip()
         base_url = self.ai_config.get("base_url", "https://api.deepseek.com").strip()
@@ -2123,9 +2188,15 @@ jupiter_fallback=true 时也补翻页轨迹。再答题，最后完课。
 
         for attempt in range(1, max_retries + 1):
             try:
-                resp = self.api.session.post(
+                # AI 使用独立 HTTP 请求，避免携带学习平台的 Token 和 Cookie。
+                resp = requests.post(
                     url, headers=headers, json=payload, timeout=timeout
                 )
+                reason = self._permanent_ai_error(resp)
+                if reason:
+                    self._ai_disabled_reason = reason
+                    self.log.warning(f'AI 搜题暂不可用：{reason}。本账号后续不再重复请求，继续使用本地题库。')
+                    return []
                 resp.raise_for_status()
                 res_data = resp.json()
 
@@ -2137,7 +2208,10 @@ jupiter_fallback=true 时也补翻页轨迹。再答题，最后完课。
                         f"total: {usage.get('total_tokens', '?')}"
                     )
 
-                content = res_data["choices"][0]["message"]["content"].strip()
+                raw_content = res_data['choices'][0]['message'].get('content')
+                content = raw_content.strip() if isinstance(raw_content, str) else ''
+                if not content:
+                    raise ValueError('AI 响应没有包含可解析的答案')
                 break
 
             except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
@@ -2179,6 +2253,27 @@ jupiter_fallback=true 时也补翻页轨迹。再答题，最后完课。
             self.log.warning("AI 返回的答案未能匹配任何有效选项")
 
         return valid_ids
+
+    @staticmethod
+    def _permanent_ai_error(response) -> str:
+        """配置错误、鉴权失败和用量耗尽不能通过立即重试恢复。"""
+        if response.status_code < 400:
+            return ''
+        try:
+            body = json.dumps(response.json(), ensure_ascii=False).lower()
+        except (ValueError, TypeError):
+            body = ''
+        if 'model is unavailable' in body or 'model_not_found' in body:
+            return '所配置的模型已不可用，请更新模型名称'
+        if response.status_code == 429 and any(text in body for text in ('freeusagelimiterror', 'quota', 'usage limit reached')):
+            return '服务商免费额度已耗尽，需要等待额度恢复'
+        if response.status_code in (401, 403):
+            return 'API Key 无效或没有访问该模型的权限'
+        if response.status_code == 402:
+            return '服务商余额或可用额度不足'
+        if response.status_code == 400:
+            return '模型拒绝了请求参数，请检查模型兼容性'
+        return ''
 
     @staticmethod
     def _parse_ai_answer(content: str) -> list | None:

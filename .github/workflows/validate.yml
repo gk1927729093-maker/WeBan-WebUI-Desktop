@@ -1,0 +1,32 @@
+name: 验证源码
+
+on:
+  push:
+    branches: [main, desktop]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.12.10'
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24'
+      - name: 安装固定版本依赖
+        run: python -m pip install -r installer/requirements-installed.txt
+      - name: Python 测试
+        run: python -m unittest discover -s tests -v
+      - name: 前端归档与分组测试
+        run: node --test tests/test_archive_progress.js tests/test_chapter_groups.js
+      - name: 检查补丁格式
+        run: git diff --check

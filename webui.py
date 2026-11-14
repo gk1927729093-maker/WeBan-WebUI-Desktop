@@ -18,9 +18,12 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse
 import uvicorn
+from account_support import account_id, account_log_folder, parse_accounts, valid_account
+from webui_runner import EVENT_PREFIX
+from chapter_progress import ChapterStore, IdleChapterService
 
 try:
     import tomllib
@@ -38,18 +41,33 @@ DATA_DIR = Path(os.environ.get("WB_DATA_DIR", APP_DIR)).resolve()
 CONFIG_FILE = DATA_DIR / "config.toml"
 LOG_DIR = DATA_DIR / "logs"
 MAIN_SCRIPT = APP_DIR / "main.py"
+RUNNER_SCRIPT = APP_DIR / "webui_runner.py"
+STATE_FILE = LOG_DIR / "webui-state.json"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # 全局状态
 app = FastAPI(title="WeBan WebUI")
 task_process: Optional[subprocess.Popen] = None
 task_running = False
+task_launch_time = 0.0
 task_lock = threading.RLock()
-task_logs: deque[tuple[int, str]] = deque(maxlen=500)
+task_logs: deque[dict] = deque(maxlen=5000)
 task_log_sequence = 0
+config_lock = threading.RLock()
 school_cache: list[str] = []
 school_cache_loaded_at = 0.0
 school_cache_lock = threading.Lock()
+def _account_needs_worker(key):
+    if task_process is None or task_process.poll() is not None:
+        return False
+    state = _read_task_state()
+    if state.get('updated_at', 0) < task_launch_time:
+        return True
+    item = next((account for account in state.get('accounts', []) if account['id'] == key), None)
+    return item is None or item['status'] in ('queued', 'running') or item.get('chapter_reader_ready', False)
+
+
+chapter_service = IdleChapterService(ChapterStore(LOG_DIR / 'chapter-progress'), _account_needs_worker)
 
 # 日志配置
 logging.basicConfig(level=logging.INFO)
@@ -72,20 +90,35 @@ def _get_weban_python_command() -> list[str]:
 @app.get("/api/task/status")
 async def get_task_status():
     """获取任务状态"""
-    return {
-        "running": task_process is not None and task_process.poll() is None
-    }
+    running = task_process is not None and task_process.poll() is None
+    state = _read_task_state()
+    accounts = state.get('accounts', [])
+    for account in accounts:
+        if not account.get('exam_scores'):
+            cached = chapter_service.store.read(account['id']) or {}
+            account['exam_scores'] = [exam for project in cached.get('projects', [])
+                                      for exam in project.get('exams', []) if exam.get('taken')]
+    if not running:
+        for account in accounts:
+            if account['status'] in ('running', 'queued'):
+                account.update(status='stopped', message='任务已停止。')
+    counts = {name: sum(item['status'] == name for item in accounts)
+              for name in ('queued', 'running', 'completed', 'failed', 'attention', 'stopped')}
+    return {'running': running, 'accounts': accounts, 'counts': counts,
+            'run_id': state.get('run_id', ''),
+            'all_finished': bool(accounts) and counts['running'] + counts['queued'] == 0,
+            'max_workers': state.get('max_workers', 5)}
 
 
 @app.post("/api/task/start")
-async def start_task():
+def start_task(data: Optional[Dict[str, Any]] = None):
     """启动任务"""
-    global task_process, task_running
+    global task_process, task_running, task_launch_time
 
     with task_lock:
         if task_process is not None and task_process.poll() is None:
             return {"success": False, "message": "任务已在运行中"}
-        if not MAIN_SCRIPT.is_file():
+        if not MAIN_SCRIPT.is_file() or not RUNNER_SCRIPT.is_file():
             return {"success": False, "message": "未找到 main.py 本体程序"}
 
         accounts = load_config().get("account", [])
@@ -103,15 +136,18 @@ async def start_task():
             }
 
         try:
+            chapter_service.pause_for_run()
             python_command = _get_weban_python_command()
+            task_launch_time = time.time()
             task_process = subprocess.Popen(
                 [
                     *python_command,
                     "-u",
-                    MAIN_SCRIPT.name,
+                    RUNNER_SCRIPT.name,
                     "--data-dir",
                     str(DATA_DIR),
                     "--non-interactive",
+                    *(['--resume-unfinished'] if (data or {}).get('resume_unfinished') is True else []),
                 ],
                 cwd=str(APP_DIR),
                 stdout=subprocess.PIPE,
@@ -126,10 +162,12 @@ async def start_task():
                     "NO_COLOR": "1",
                 },
                 bufsize=1,
-                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                creationflags=(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                               | getattr(subprocess, "CREATE_NO_WINDOW", 0)),
             )
             task_running = True
-            _append_task_log("WeBan 任务已启动。")
+            chapter_service.resume_idle()
+            _append_task_log("任务队列已启动，运行中可以继续添加账号。")
             threading.Thread(
                 target=_stream_task_output,
                 args=(task_process,),
@@ -137,6 +175,7 @@ async def start_task():
             ).start()
             return {"success": True}
         except OSError as exc:
+            chapter_service.resume_idle()
             logger.exception("启动 WeBan 失败")
             return {"success": False, "message": f"启动失败：{exc}"}
 
@@ -152,16 +191,22 @@ async def stop_task():
             return {"success": False, "message": "任务未在运行"}
 
         try:
-            task_process.terminate()
+            if os.name == 'nt':
+                subprocess.run(['taskkill', '/PID', str(task_process.pid), '/T', '/F'],
+                               check=True, capture_output=True,
+                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            else:
+                task_process.terminate()
             task_process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             task_process.kill()
             task_process.wait(timeout=5)
-        except OSError as exc:
+        except (OSError, subprocess.CalledProcessError) as exc:
             logger.exception("停止 WeBan 失败")
             return {"success": False, "message": f"停止失败：{exc}"}
 
         task_running = False
+        _mark_task_stopped()
         _append_task_log("WeBan 任务已停止。")
         return {"success": True}
 
@@ -170,8 +215,33 @@ async def stop_task():
 async def get_accounts():
     """获取账号列表"""
     config = load_config()
-    accounts = config.get("account", [])
-    return {"accounts": accounts}
+    status = await get_task_status()
+    states = {item['id']: item for item in status['accounts']}
+    accounts = []
+    for item in config.get('account', []):
+        key = account_id(item)
+        accounts.append({'id': key, 'tenant_name': item.get('tenant_name', ''),
+                         'username': item.get('username') or item.get('user_id', ''),
+                         'status': states.get(key, {}).get('status', 'idle'),
+                         'message': states.get(key, {}).get('message', '尚未启动。'),
+                         'exam_scores': states.get(key, {}).get('exam_scores', []),
+                         'has_password': bool(item.get('password')), 'has_token': bool(item.get('token'))})
+    return {'accounts': accounts}
+
+
+@app.get('/api/accounts/{key}/chapters')
+def get_account_chapters(key: str, refresh: bool = False):
+    config = load_config()
+    account = next((item for item in config.get('account', []) if account_id(item) == key), None)
+    if account is None:
+        raise HTTPException(404, '未找到该账号。')
+    result = chapter_service.request(account, config.get('settings', {}), force=refresh)
+    state = next((item for item in _read_task_state().get('accounts', []) if item['id'] == key), {})
+    active = task_process is not None and task_process.poll() is None
+    status = state.get('status', 'idle')
+    result['task_status'] = 'stopped' if not active and status in ('running', 'queued') else status
+    result['current_course'] = state.get('current_course', '') if active and status == 'running' else ''
+    return result
 
 
 @app.get("/api/schools")
@@ -194,45 +264,44 @@ async def add_account(data: Dict[str, Any]):
     if not tenant_name or not username:
         return {"success": False, "message": "学校名称和用户名不能为空"}
 
-    config = load_config()
-    accounts = config.setdefault("account", [])
-    if any(
-        account.get("tenant_name") == tenant_name
-        and account.get("username") == username
-        for account in accounts
-    ):
-        return {"success": False, "message": "该学校下的账号已存在"}
+    result = _store_accounts([{'tenant_name': tenant_name, 'username': username, 'password': password}])
+    if result.get('duplicates') and not result.get('added'):
+        return {'success': False, 'message': '该学校下的账号已存在'}
+    return result
 
-    accounts.append(
-        {
-            "tenant_name": tenant_name,
-            "username": username,
-            "password": password,
-        }
-    )
-    if not save_config(config):
-        return {"success": False, "message": "配置文件保存失败，请检查文件权限"}
-    return {"success": True}
+
+@app.post('/api/accounts/import')
+async def import_accounts(data: Dict[str, Any]):
+    text = str(data.get('text', ''))
+    if len(text) > 2_000_000:
+        return {'success': False, 'message': '导入内容过大，请每次导入不超过 2 MB 的文本。'}
+    accounts, errors = parse_accounts(text, str(data.get('tenant_name', '')))
+    if not accounts:
+        return {'success': False, 'added': 0, 'duplicates': 0, 'errors': errors,
+                'message': '没有可导入的账号，请检查学校和文本格式。'}
+    result = _store_accounts(accounts)
+    result['errors'] = errors
+    return result
 
 
 @app.delete("/api/accounts/{username}")
 async def delete_account(username: str, tenant_name: Optional[str] = None):
     """删除账号"""
-    config = load_config()
-    accounts = config.get("account", [])
-    remaining = [
-        account
-        for account in accounts
-        if not (
-            account.get("username") == username
-            and (tenant_name is None or account.get("tenant_name") == tenant_name)
-        )
-    ]
-    if len(remaining) == len(accounts):
-        return {"success": False, "message": "未找到该账号"}
-    config["account"] = remaining
-    if not save_config(config):
-        return {"success": False, "message": "配置文件保存失败，请检查文件权限"}
+    status = await get_task_status()
+    if any(item['username'] == username and item['status'] == 'running' and
+           (tenant_name is None or item['tenant_name'] == tenant_name) for item in status['accounts']):
+        return {'success': False, 'message': '该账号正在运行，请等待完成后再删除。'}
+    with config_lock:
+        config = load_config()
+        accounts = config.get('account', [])
+        remaining = [item for item in accounts if not (
+            item.get('username') == username and
+            (tenant_name is None or item.get('tenant_name') == tenant_name))]
+        if len(remaining) == len(accounts):
+            return {'success': False, 'message': '未找到该账号'}
+        config['account'] = remaining
+        if not save_config(config):
+            return {'success': False, 'message': '配置文件保存失败，请检查文件权限'}
     return {"success": True}
 
 
@@ -246,29 +315,66 @@ async def get_settings():
 @app.post("/api/settings")
 async def update_settings(data: Dict[str, Any]):
     """更新设置"""
-    config = load_config()
-    config.setdefault("settings", {}).update(data)
-    if not save_config(config):
-        return {"success": False, "message": "配置文件保存失败，请检查文件权限"}
+    if 'max_workers' in data and (type(data['max_workers']) is not int or not 1 <= data['max_workers'] <= 50):
+        return {'success': False, 'message': '最大并发数必须是 1 至 50 的整数。'}
+    with config_lock:
+        config = load_config()
+        config.setdefault('settings', {}).update(data)
+        if not save_config(config):
+            return {'success': False, 'message': '配置文件保存失败，请检查文件权限'}
     return {"success": True}
 
 
 @app.get("/api/logs")
-async def get_logs():
+async def get_logs(account: Optional[str] = None):
     """获取日志列表"""
     logs = []
+    owners = {account_id(item): item for item in load_config().get('account', [])}
+    for item in _read_task_state().get('accounts', []):
+        owners.setdefault(item['id'], item)
+    accounts = list(owners.values())
+    folders = {account_log_folder(item): item for item in accounts}
+    old_folders = {}
+    for item in accounts:
+        old_folders.setdefault(str(item.get('username', '')), []).append(item)
     if LOG_DIR.exists():
         for log_file in sorted(
             LOG_DIR.rglob("*.log"),
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         ):
+            relative = log_file.relative_to(LOG_DIR)
+            owner = folders.get(relative.parts[0]) if len(relative.parts) > 1 else None
+            if owner is None and len(relative.parts) > 1:
+                matches = old_folders.get(relative.parts[0], [])
+                if len(matches) == 1:
+                    owner = matches[0]
+            key = account_id(owner) if owner else ''
+            if account is not None and key != account:
+                continue
             logs.append({
                 "name": log_file.relative_to(LOG_DIR).as_posix(),
                 "size": log_file.stat().st_size,
-                "modified": log_file.stat().st_mtime
+                "modified": log_file.stat().st_mtime,
+                "account_id": key,
+                "username": owner.get('username', '') if owner else '',
+                "tenant_name": owner.get('tenant_name', '') if owner else ''
             })
-    return {"logs": logs[:50]}
+    return {"logs": logs[:1000]}
+
+
+@app.get('/api/logs/content')
+async def get_log_content(name: str):
+    path = (LOG_DIR / name).resolve()
+    if not path.is_relative_to(LOG_DIR.resolve()) or path.suffix != '.log':
+        raise HTTPException(400, '日志路径不合法。')
+    if not path.is_file():
+        raise HTTPException(404, '日志文件不存在。')
+    with path.open('rb') as file:
+        size = path.stat().st_size
+        file.seek(max(0, size - 400_000))
+        content = file.read().decode('utf-8', errors='replace')
+    return {'name': name, 'content': content, 'truncated': size > 400_000}
 
 
 @app.websocket("/ws/logs")
@@ -280,16 +386,56 @@ async def websocket_logs(websocket: WebSocket):
         while True:
             with task_lock:
                 pending = [
-                    (sequence, line)
-                    for sequence, line in task_logs
-                    if sequence > last_sequence
+                    item for item in task_logs if item['sequence'] > last_sequence
                 ]
-            for sequence, line in pending:
-                await websocket.send_text(line)
-                last_sequence = sequence
+            for item in pending:
+                await websocket.send_json(item)
+                last_sequence = item['sequence']
             await asyncio.sleep(0.4)
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):
         pass
+
+
+def _read_task_state() -> dict:
+    try:
+        return json.loads(STATE_FILE.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {'accounts': []}
+
+
+def _mark_task_stopped():
+    state = _read_task_state()
+    state['accepting'] = False
+    for item in state.get('accounts', []):
+        if item['status'] in ('running', 'queued'):
+            item.update(status='stopped', message='已停止。', finished_at=time.time())
+    temporary = STATE_FILE.with_suffix('.json.tmp')
+    temporary.write_text(json.dumps(state, ensure_ascii=False), encoding='utf-8')
+    os.replace(temporary, STATE_FILE)
+
+
+def _store_accounts(new_accounts):
+    with config_lock:
+        config = load_config()
+        accounts = config.setdefault('account', [])
+        existing = {account_id(item) for item in accounts}
+        added, duplicates = 0, 0
+        for item in new_accounts:
+            key = account_id(item)
+            if key in existing:
+                duplicates += 1
+                continue
+            accounts.append(item)
+            existing.add(key)
+            added += 1
+        if added and not save_config(config):
+            return {'success': False, 'message': '配置文件保存失败，请检查文件权限。'}
+    active = task_process is not None and task_process.poll() is None
+    if added:
+        _append_task_log(f'已新增 {added} 个账号。' + ('将自动加入当前队列。' if active else '启动任务后开始执行。'))
+    return {'success': True, 'added': added, 'duplicates': duplicates,
+            'queued': added if active else 0,
+            'message': '账号已保存，并自动加入当前队列。' if active else '账号已保存，点击启动任务即可运行。'}
 
 
 # ========== 配置管理 ==========
@@ -380,7 +526,7 @@ def save_config(config: Dict[str, Any]) -> bool:
         return False
 
 
-def _append_task_log(line: str) -> None:
+def _append_task_log(line: str, key: str = '', level: str = 'INFO') -> None:
     global task_log_sequence
     # 本体的 Loguru 终端 sink 会输出 ANSI 颜色控制码；实时日志只保留可读文本。
     message = ANSI_ESCAPE_RE.sub("", line).rstrip()
@@ -388,7 +534,8 @@ def _append_task_log(line: str) -> None:
         return
     with task_lock:
         task_log_sequence += 1
-        task_logs.append((task_log_sequence, message))
+        task_logs.append({'sequence': task_log_sequence, 'account_id': key,
+                          'line': message[:12000], 'level': level})
 
 
 def _stream_task_output(process: subprocess.Popen) -> None:
@@ -398,13 +545,21 @@ def _stream_task_output(process: subprocess.Popen) -> None:
 
     try:
         for line in process.stdout:
-            _append_task_log(line)
+            if line.startswith(EVENT_PREFIX):
+                try:
+                    event = json.loads(line[len(EVENT_PREFIX):])
+                    _append_task_log(event.get('line', ''), event.get('account_id', ''), event.get('level', 'INFO'))
+                except (ValueError, TypeError):
+                    _append_task_log('收到无法解析的任务日志。', level='WARNING')
+            else:
+                _append_task_log(line)
     finally:
         return_code = process.wait()
         _append_task_log(f"WeBan 任务已退出，退出码：{return_code}。")
         with task_lock:
             if task_process is process:
                 task_running = False
+                chapter_service.resume_idle()
 
 # ========== HTML 界面 ==========
 
@@ -1005,6 +1160,12 @@ HTML_CONTENT = """
                     </svg>
                     <span data-i18n="nav.accounts">账号管理</span>
                 </button>
+                <button class="nav-item" data-page="chapters">
+                    <svg class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                        <path stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 4h6a3 3 0 013 3v13a4 4 0 00-4-2H4V4zm16 0h-5a3 3 0 00-2 1v15a4 4 0 014-2h3V4z"></path>
+                    </svg>
+                    <span>章节进度</span>
+                </button>
                 <button class="nav-item" data-page="settings">
                     <svg class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
@@ -1036,15 +1197,61 @@ HTML_CONTENT = """
                     </div>
                 </div>
                 <div class="card">
+                    <h2 class="card-title">账号进度</h2>
+                    <div id="account-summary" class="account-summary" aria-live="polite"></div>
+                    <div id="account-progress" class="account-list"></div>
+                </div>
+                <div class="card">
                     <h2 class="card-title" data-i18n="dashboard.realtimeLogs">实时日志</h2>
+                    <label class="form-label" for="realtime-account-filter">选择账号</label>
+                    <select id="realtime-account-filter" class="form-input log-account-filter"><option value="all">全部账号</option></select>
                     <div id="realtime-logs" class="log-viewer"></div>
                 </div>
             </div>
 
             <!-- Accounts -->
+            <div id="page-chapters" class="page">
+                <div class="card">
+                    <h2 class="card-title">实时章节进度</h2>
+                    <p class="feature-hint">选择账号后同步平台进度，展开章节可查看每节课的完成状态。</p>
+                    <label class="form-label" for="chapter-account">选择账号</label>
+                    <select id="chapter-account" class="form-input chapter-account-select"><option value="">请选择账号</option></select>
+                    <div class="chapter-toolbar">
+                        <label class="chapter-auto-label"><input id="chapter-auto-refresh" type="checkbox" checked> 自动同步（约 10 秒）</label>
+                        <label class="chapter-auto-label"><input id="chapter-only-pending" type="checkbox"> 仅显示未完成课程</label>
+                        <button id="chapter-refresh" class="btn btn-primary btn-sm" type="button">立即刷新</button>
+                    </div>
+                    <div id="chapter-sync-status" class="chapter-sync-status" role="status" aria-live="polite">请选择账号查看章节。</div>
+                    <div id="chapter-current-course" class="chapter-current-course" hidden></div>
+                </div>
+                <div id="chapter-projects" aria-live="polite"></div>
+            </div>
+
             <div id="page-accounts" class="page">
                 <div class="card">
-                    <h2 class="card-title" data-i18n="accounts.title">账号管理</h2>
+                    <h2 class="card-title">批量导入账号</h2>
+                    <p class="feature-hint">支持从 Excel 直接粘贴，或选择 CSV / TXT / TSV 文件。运行中导入会自动加入队列。</p>
+                    <form id="form-import-accounts">
+                        <div class="form-group">
+                            <label class="form-label" for="batch-school">默认学校（同一学校只需填写一次）</label>
+                            <input id="batch-school" class="form-input" list="batch-schools" autocomplete="off" placeholder="输入并选择完整学校名称">
+                            <datalist id="batch-schools"></datalist>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label" for="batch-accounts">账号列表</label>
+                            <textarea id="batch-accounts" class="form-input batch-textarea" rows="7" spellcheck="false" placeholder="学号,密码&#10;20260001,密码一&#10;20260002,密码二&#10;&#10;不同学校使用三列：学校,学号,密码"></textarea>
+                            <div class="school-hint">每行一个账号，支持逗号、制表符或空格分隔。密码留空时使用学号，重复账号会跳过。</div>
+                        </div>
+                        <div class="import-controls">
+                            <input id="batch-file" type="file" accept=".csv,.txt,.tsv" aria-label="选择账号文件">
+                            <button id="btn-import" type="submit" class="btn btn-primary">批量导入</button>
+                        </div>
+                        <div id="import-result" class="import-result" role="status" aria-live="polite"></div>
+                    </form>
+                </div>
+                <div class="card">
+                    <h2 class="card-title">单个添加账号</h2>
+                    <p class="feature-hint">运行中添加会自动排队，不会重启或打断其他账号。</p>
                     <form id="form-add-account">
                         <div class="form-group">
                             <label class="form-label" data-i18n="accounts.school">学校名称</label>
@@ -1123,7 +1330,11 @@ HTML_CONTENT = """
             <div id="page-logs" class="page">
                 <div class="card">
                     <h2 class="card-title" data-i18n="logs.title">历史日志</h2>
+                    <label class="form-label" for="history-account-filter">按账号分类</label>
+                    <select id="history-account-filter" class="form-input log-account-filter"><option value="all">全部账号</option></select>
                     <div id="log-list" class="account-list"></div>
+                    <h3 id="history-log-name" class="history-log-name"></h3>
+                    <pre id="history-log-content" class="log-viewer history-log-content" hidden></pre>
                 </div>
             </div>
         </main>
@@ -1304,9 +1515,12 @@ HTML_CONTENT = """
                     });
                     const result = await response.json();
                     if (result.success) {
-                        alert(i18n[currentLang]['msg.success']);
+                        alert(result.message || i18n[currentLang]['msg.success']);
+                        const savedSchool = e.target.elements.tenant_name.value;
                         e.target.reset();
+                        e.target.elements.tenant_name.value = savedSchool;
                         loadAccounts();
+                        loadTaskStatus();
                     } else {
                         alert(i18n[currentLang]['msg.error'] + ': ' + result.message);
                     }
@@ -1608,7 +1822,24 @@ HTML_CONTENT = """
 @app.get("/")
 async def root():
     """返回 HTML 界面"""
-    return HTMLResponse(HTML_CONTENT)
+    html = HTML_CONTENT.replace('</head>', '<link rel="stylesheet" href="/assets/extensions.css"></head>')
+    html = html.replace('</body>', '<script src="/assets/extensions.js"></script><script src="/assets/chapters.js"></script></body>')
+    return HTMLResponse(html, headers={'Cache-Control': 'no-store'})
+
+
+@app.get('/assets/extensions.js')
+async def extensions_js():
+    return FileResponse(APP_DIR / 'webui_extensions.js', media_type='application/javascript', headers={'Cache-Control': 'no-store'})
+
+
+@app.get('/assets/extensions.css')
+async def extensions_css():
+    return FileResponse(APP_DIR / 'webui_extensions.css', media_type='text/css', headers={'Cache-Control': 'no-store'})
+
+
+@app.get('/assets/chapters.js')
+def chapters_js():
+    return FileResponse(APP_DIR / 'webui_chapters.js', media_type='application/javascript', headers={'Cache-Control': 'no-store'})
 
 
 if __name__ == "__main__":

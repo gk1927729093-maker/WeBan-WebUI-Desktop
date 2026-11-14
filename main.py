@@ -14,6 +14,7 @@ from loguru import logger
 
 from captcha import check_browser_health, is_non_interactive
 from client import WeBanClient, read_first_existing
+from account_support import account_id, account_log_folder
 
 # ── 命令行参数与环境变量（优先级：CLI > 环境变量 > 配置文件）────────
 
@@ -564,10 +565,12 @@ def load_config() -> dict:
 # ── 账号级日志过滤器 ─────────────────────────────────────────
 
 
-def _make_account_filter(account_name: str):
+def _make_account_filter(account_name: str, account_key: str | None = None):
     """返回一个 loguru filter，只放行 extra[account] == account_name 的日志记录"""
 
     def filter_fn(record) -> bool:
+        if account_key is not None:
+            return record["extra"].get("account_key") == account_key
         return record["extra"].get("account") == account_name
 
     return filter_fn
@@ -577,7 +580,8 @@ def _make_account_filter(account_name: str):
 
 
 def run_account(
-    account_config: dict, global_settings: dict, ai_config: dict, account_index: int
+    account_config: dict, global_settings: dict, ai_config: dict, account_index: int,
+    progress_observer=None,
 ) -> bool:
     """运行单个账号的任务
 
@@ -613,6 +617,7 @@ def run_account(
 
     # 账号标识（用于日志文件夹名）
     account_name = username or user_id or f"account_{account_index}"
+    account_key = account_id(account_config)
 
     # 合并设置（账号级优先，回退到全局；CLI/环境变量最高优先）
     study_mode = cli_or_env(
@@ -630,7 +635,7 @@ def run_account(
         random_answer = bool(random_answer_raw)
     # 无交互模式下不允许手动输入答案，强制随机作答
     if NON_INTERACTIVE and not random_answer:
-        log = logger.bind(account=account_name)
+        log = logger.bind(account=account_name, account_key=account_key)
         log.warning("无交互模式下强制启用随机作答（random_answer=true）")
         random_answer = True
     study_time = cli_or_env(
@@ -681,14 +686,14 @@ def run_account(
     )
 
     # 为该账号创建专属日志文件夹
-    account_log_dir = os.path.join(logs_dir, account_name)
+    account_log_dir = os.path.join(logs_dir, account_log_folder(account_config))
     os.makedirs(account_log_dir, exist_ok=True)
     account_log_path = os.path.join(
         account_log_dir, f"weban-{run_start_ts}.log"
     )
 
     # 添加只属于该账号的日志 sink（debug 请求/响应详情走 DEBUG 级别，需放行）
-    account_filter = _make_account_filter(account_name)
+    account_filter = _make_account_filter(account_name, account_key)
     handler_id = logger.add(
         account_log_path,
         encoding="utf-8",
@@ -697,7 +702,7 @@ def run_account(
         filter=account_filter,
     )
 
-    log = logger.bind(account=account_name)
+    log = logger.bind(account=account_name, account_key=account_key)
 
     try:
         # ── 构建客户端 ──
@@ -744,6 +749,12 @@ def run_account(
             log.error("登录失败")
             return False
 
+        if progress_observer is not None:
+            try:
+                progress_observer(account_config, client)
+            except Exception as exc:
+                log.warning(f'章节查看暂未就绪（{type(exc).__name__}），继续当前学习任务。')
+
         log.info("登录成功，模拟打开首页")
         client.simulate_home_page()
 
@@ -761,6 +772,10 @@ def run_account(
             exam_question_time=exam_question_time,
             exam_submit_match_rate=exam_submit_match_rate,
         )
+
+        # 完成状态依据最终进度，不把中途重试后已恢复的错误当作未完成。
+        completion = client.check_cycle_completion(study_mode, exam_mode)
+        log.bind(completion_result=completion).info('最终进度核验：' + completion['message'])
 
         # ── 最终同步 ──
         log.info("最终同步答案")

@@ -303,3 +303,17 @@ answer/*
 .claude
 src/
 logs/
+
+# 本机运行数据和发布构建产物
+.env
+.env.*
+!.env.example
+data/
+chapter-progress/
+webui-state*.json
+*.pid
+*.msi
+*.wixobj
+*.wixpdb
+*.pfx
+*.p12

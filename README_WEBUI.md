@@ -1,151 +1,35 @@
-# WeBan WebUI
+# WebUI 使用与开发说明
 
-WeBan WebUI is a local web interface for the WeBan runtime. It uses an
-Apple-inspired light visual style and supports Chinese and English.
+项目概览、下载方式、来源与功能清单见 [README.md](README.md)，完整操作说明见 [使用说明.txt](使用说明.txt)。
 
-## Features
+WebUI 使用 FastAPI，持续队列在独立 Python 子进程中运行。账号配置写入采用锁和原子替换，运行中可接入新增账号。完成状态保存在数据目录的 `logs/webui-state.json`；章节快照保存在 `logs/chapter-progress`。这些文件属于用户运行数据，不应提交到仓库。
 
-- Start and stop the real `main.py` process from the dashboard.
-- Stream task output through a WebSocket log panel.
-- Add, list, and delete accounts without changing unrelated config sections.
-- Load the official school list and filter it by typing a few characters.
-- Select the complete school name from the autocomplete suggestions.
-- Edit the main study and exam settings.
-- Use the interface on desktop or mobile layouts.
+## 常用接口
 
-## Requirements
+| 接口 | 方法 | 用途 |
+| --- | --- | --- |
+| `/api/task/status` | GET | 任务与各账号状态 |
+| `/api/task/start` | POST | 启动持续队列，默认跳过已完成账号 |
+| `/api/task/stop` | POST | 停止队列及其子进程 |
+| `/api/accounts` | GET / POST | 获取公开账号元数据或添加账号 |
+| `/api/accounts/import` | POST | 批量导入账号 |
+| `/api/accounts/{key}/chapters` | GET | 指定账号的只读章节进度 |
+| `/api/settings` | GET / POST | 全局设置 |
+| `/api/logs` | GET | 按账号筛选历史日志 |
+| `/api/logs/content` | GET | 受目录限制的日志内容读取 |
+| `/ws/logs` | WebSocket | 实时账号日志 |
 
-The WeBan runtime targets Python 3.12:
+完成归档和章节账号分组由前端根据保存的完成时间及任务状态呈现，不会触发重新学习或重新考试。
 
-```text
-Python >= 3.12, < 3.13
-```
+## 数据目录与监听地址
 
-Install the dependencies with:
-
-```bash
-py -3.12 -m pip install -r requirements.txt
-```
-
-Verify the important packages:
-
-```bash
-py -3.12 -c "import fastapi, uvicorn, tomli_w, requests, pyaes, nodriver, cv2; print('dependencies ok')"
-```
-
-## Start
-
-On Windows, double-click `启动WebUI.bat` or run:
-
-```bash
-py -3.12 webui.py
-```
-
-Open:
-
-```text
-http://127.0.0.1:8080
-```
-
-The WebUI and `main.py` must remain in the same fork directory. The task
-controller starts the local `main.py` with `--data-dir` and
-`--non-interactive`, so the WebUI and the runtime use the same configuration
-and log directory.
-
-## Account Configuration
-
-The account form writes the format expected by WeBan:
-
-```toml
-[[account]]
-tenant_name = "The complete school name shown by WeBan"
-username = "Your student number"
-password = "Your password"
-```
-
-The school name is required. Type part of the name, then select the complete
-name returned by the official WeBan school list. Do not use an abbreviation or
-an approximate name, because the runtime uses the exact tenant name to find
-the school code.
-
-The existing `config.toml` is not overwritten during startup. Saving an
-account or setting uses an atomic temporary file and keeps unrelated TOML
-sections.
-
-## Custom Data Directory
-
-Set `WB_DATA_DIR` when configuration and logs should live outside the source
-directory:
+源码模式可设置 `WB_DATA_DIR` 指定配置、题库和日志位置。`WEBUI_HOST` 与 `WEBUI_PORT` 控制监听地址和端口。
 
 ```powershell
 $env:WB_DATA_DIR = "D:\WeBanData"
-py -3.12 webui.py
-```
-
-The WebUI still starts the local `main.py`; only `config.toml` and `logs` move
-to the selected data directory.
-
-## Host and Port
-
-The defaults are localhost and port 8080. Override them with:
-
-```powershell
 $env:WEBUI_HOST = "127.0.0.1"
-$env:WEBUI_PORT = "8081"
-py -3.12 webui.py
+$env:WEBUI_PORT = "8080"
+.\.venv\Scripts\python.exe webui.py
 ```
 
-The default localhost binding is intentional because passwords are stored in
-`config.toml` as plain text and the WebUI has no built-in authentication.
-
-## API
-
-| Endpoint | Method | Purpose |
-| --- | --- | --- |
-| `/` | GET | Serve the WebUI |
-| `/api/task/status` | GET | Read task status |
-| `/api/task/start` | POST | Start the real `main.py` |
-| `/api/task/stop` | POST | Stop the task process |
-| `/api/accounts` | GET | List configured accounts |
-| `/api/accounts` | POST | Add an account |
-| `/api/accounts/{username}` | DELETE | Delete an account |
-| `/api/schools` | GET | Load the official autocomplete list |
-| `/api/settings` | GET | Read global settings |
-| `/api/settings` | POST | Save global settings |
-| `/api/logs` | GET | List historical log files |
-| `/ws/logs` | WebSocket | Stream task output |
-
-## Troubleshooting
-
-### The WebUI does not start
-
-Use Python 3.12 explicitly. Python 3.14 is not supported by the project
-metadata and may fail when importing `nodriver`.
-
-```powershell
-py -3.12 webui.py
-```
-
-### The page looks unchanged
-
-Refresh `http://127.0.0.1:8080/` after restarting the server. A running
-Python process does not reload `webui.py` automatically.
-
-### The school list is unavailable
-
-The WebUI uses the official school endpoint and falls back to school names
-already present in the local configuration if the endpoint is temporarily
-unavailable.
-
-### The task refuses to start
-
-Save at least one account with a complete school name, username, and password.
-The WebUI refuses to start `main.py` when no valid account is configured.
-
-## Development Checks
-
-```powershell
-py -3.12 -m compileall -q webui.py
-py -3.12 main.py --help
-git diff --check
-```
+安装版由启动器设置自己的数据目录、监听端口和内置 Python。后台启动器会核验进程路径、创建时间和实例标识，避免停止其他部署。
