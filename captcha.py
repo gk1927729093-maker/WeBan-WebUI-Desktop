@@ -25,7 +25,20 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, ClassVar
 
-import cv2
+try:
+    import cv2
+except ImportError as exc:
+    if sys.platform == "win32" and exc.name == "cv2" and "DLL load failed" in str(exc):
+        system_dir = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+        missing = [name for name in ("MFPlat.dll", "MF.dll", "MFReadWrite.dll")
+                   if not (system_dir / name).is_file()]
+        if missing:
+            raise ImportError(
+                f"OpenCV 无法加载，缺少 Windows 媒体组件（{', '.join(missing)}）。"
+                "如使用 Windows 10/11 N，请在系统的可选功能中安装媒体功能包并重启。"
+            ) from exc
+    raise
+
 import nodriver
 import numpy as np
 import requests
@@ -607,20 +620,22 @@ class LoginCaptchaSolver:
         if not cls._initialized:
             with cls._lock:
                 if not cls._initialized:
+                    if getattr(sys, "frozen", False):
+                        model_dir = Path(sys._MEIPASS)  # type: ignore[attr-defined]
+                    else:
+                        model_dir = Path(__file__).parent
+                    model_path = model_dir / "captcha_model.onnx"
                     try:
-                        if getattr(sys, "frozen", False):
-                            model_path = Path(sys._MEIPASS) / "captcha_model.onnx"  # type: ignore[attr-defined]
-                        else:
-                            model_path = Path(__file__).parent / "captcha_model.onnx"
-
-                        if not model_path.exists():
-                            log.warning(f"验证码模型文件不存在: {model_path}")
-                            cls._ocr = False
-                        else:
-                            # OpenCV 失败只会抛 cv2.error（模型文件已提前检查存在）
-                            cls._ocr = cv2.dnn.readNetFromONNX(str(model_path))
-                    except cv2.error:
-                        log.warning("OpenCV DNN 初始化失败，自动验证码识别功能将不可用")
+                        # 由 Python 打开文件，避免 Windows 上 OpenCV 的文件名接口无法读取 Unicode 路径。
+                        cls._ocr = cv2.dnn.readNetFromONNX(model_path.read_bytes())
+                    except FileNotFoundError:
+                        log.warning(f"验证码模型文件不存在: {model_path}")
+                        cls._ocr = False
+                    except OSError as exc:
+                        log.warning(f"无法读取验证码模型文件: {exc}")
+                        cls._ocr = False
+                    except cv2.error as exc:
+                        log.warning(f"OpenCV DNN 无法加载验证码模型（{exc.code}）: {exc.err}")
                         cls._ocr = False
                     cls._initialized = True
         return cls._ocr if cls._ocr is not False else None

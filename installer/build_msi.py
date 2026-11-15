@@ -21,7 +21,7 @@ import requests
 import tomli_w
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '1.0.0'
+VERSION = '1.0.1'
 UPSTREAM_BASE = 'fe844a893f3e2f80522a74717184fbecb26f13a6'
 PUBLIC_ANSWER_SHA256 = '5438af36f2fddef978306882dac56bbf54fbf1f9f399c82f3d3b3c536f9b5e57'
 NAMESPACE = uuid.UUID('398b97e9-6154-4cdc-a15e-01ef934f71bc')

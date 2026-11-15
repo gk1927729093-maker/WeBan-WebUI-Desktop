@@ -14,7 +14,7 @@
 
 前往 [Releases](https://github.com/gk1927729093-maker/WeBan-WebUI-Desktop/releases/latest) 下载：
 
-- `WeBan-WebUI-1.0.0-x64.msi`：Windows 10/11 64 位安装包，约 52 MiB。
+- `WeBan-WebUI-1.0.1-x64.msi`：Windows 10/11 64 位安装包，约 52 MiB。
 - 同名 `.sha256` 文件：安装包完整性校验。
 - `INSTALL.zh-CN.txt`：安装与数据目录说明。
 
@@ -32,6 +32,12 @@
 | 发布内容 | 不包含维护者的账号、密码、Token、API Key、运行日志和完成记录 |
 
 关闭网页不会停止后台，暂时不用时请使用开始菜单的停止入口。
+
+### 验证码故障排查
+
+旧版在安装路径含中文时可能报 `Can't read ONNX file`。安装 1.0.1 即可修复，升级沿用已有账号数据。
+
+如果报错提示缺少 `MFPlat.dll`、`MF.dll` 或 `MFReadWrite.dll`，请按 Windows 版本检查媒体组件。在 Windows 10/11 N 上，可从系统的可选功能安装媒体功能包并重启。[Microsoft 支持说明](https://support.microsoft.com/zh-cn/windows/experience/platform-variants/media-feature-pack-for-windows-n)
 
 ## 本次新增与修复
 

@@ -600,8 +600,11 @@ class WeBanClient:
         """
         if self.api.user.get("userId"):
             return self.api.user
-        retry_limit = 10
-        # 前 10 次 OCR 自动识别，后 3 次手动输入
+        retry_limit = 10 if LoginCaptchaSolver.get_ocr(self.log) is not None else 0
+        if not retry_limit and is_non_interactive():
+            self.log.error("登录验证码模型不可用，已停止本次登录。请查看前面的模型加载错误。")
+            return None
+        # 模型可用时先自动识别，命令行交互模式仍可手动输入。
         for i in range(retry_limit + 3):
             if i > 0:
                 self.log.warning(f"登录失败，正在重试 {i}/{retry_limit + 2} 次")

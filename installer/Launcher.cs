@@ -14,8 +14,8 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("WeBan WebUI")]
 [assembly: AssemblyDescription("WeBan WebUI 安装版启动和停止入口")]
 [assembly: AssemblyCompany("WeBan WebUI")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
 
 public sealed class ServerState
 {
