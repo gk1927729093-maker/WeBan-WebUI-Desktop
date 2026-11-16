@@ -1,9 +1,10 @@
-本目录构建 WeBan WebUI 的独立 Windows x64 MSI。
+本目录构建 WeBan WebUI 的独立 Windows x64 MSI 和 EXE 安装器。
 
 使用项目 Python 3.12 环境执行：
 
 ```powershell
 .\.venv\Scripts\python.exe installer\build_msi.py
+.\.venv\Scripts\python.exe installer\build_exe.py
 ```
 
 构建使用 Python 官方嵌入式发行版和 WiX v3.14.1，构建依赖下载至 `build/msi-tools`，并按固定 SHA256 校验。应用依赖取自当前项目 `.venv/Lib/site-packages`，实际版本记录在安装包的 `installer-source/requirements-installed.txt`。
@@ -14,7 +15,9 @@
 
 安装版启动器会核验后台的解释器完整路径、进程创建时间和实例标识，停止入口只管理本安装目录启动的后台。源码部署使用的端口和目录不会被接管。
 
-构建输出在 `dist`，包括 MSI、SHA256 和文件清单。未提供代码签名证书，因此产物为未签名包。
+EXE 封装同版本 MSI 和 MSI 内的启动器。检测到旧版时，它会先修复相关安装缺失或损坏的启动器，再由 Windows Installer 升级。MSI 卸载会使用包内的停止程序。
+
+构建输出在 `dist`，包括 MSI、EXE、SHA256 和文件清单。未提供代码签名证书，因此产物为未签名包。
 
 参考：
 

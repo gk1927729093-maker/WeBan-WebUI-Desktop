@@ -21,7 +21,7 @@ import requests
 import tomli_w
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '1.0.1'
+VERSION = '1.0.2'
 UPSTREAM_BASE = 'fe844a893f3e2f80522a74717184fbecb26f13a6'
 PUBLIC_ANSWER_SHA256 = '5438af36f2fddef978306882dac56bbf54fbf1f9f399c82f3d3b3c536f9b5e57'
 NAMESPACE = uuid.UUID('398b97e9-6154-4cdc-a15e-01ef934f71bc')
@@ -221,7 +221,6 @@ def write_wix(stage, path):
         if file.is_file():
             grouped[file.relative_to(stage).parent.as_posix()].append(file)
     components = []
-    launcher_id = identifier('F', 'WeBanWebUI.exe')
     for relative, directory in directories.items():
         key = identifier('C', relative)
         component = element(directory, 'Component', Id=key, Guid=str(uuid.uuid5(NAMESPACE, 'directory:' + relative.lower())).upper(), Win64='yes')
@@ -258,8 +257,11 @@ def write_wix(stage, path):
     feature = element(product, 'Feature', Id='Complete', Title='WeBan WebUI', Level='1', Absent='disallow')
     for key in components:
         element(feature, 'ComponentRef', Id=key)
-    element(product, 'CustomAction', Id='StopDesktopServer', FileKey=launcher_id,
-            ExeCommand='--stop --quiet --data-dir "[LocalAppDataFolder]WeBanWebUI\\Data"',
+    # 从安装数据库启动停止程序，已安装的启动器丢失时也能完成卸载。
+    element(product, 'Binary', Id='DesktopStopLauncher', SourceFile='$(var.StageDir)\\WeBanWebUI.exe')
+    element(product, 'CustomAction', Id='StopDesktopServer', BinaryKey='DesktopStopLauncher',
+            ExeCommand='--stop --quiet --data-dir "[LocalAppDataFolder]WeBanWebUI\\Data" '
+                       '--installed-directory "[INSTALLFOLDER]."',
             Execute='immediate', Impersonate='yes', Return='check')
     sequence = element(product, 'InstallExecuteSequence')
     action = element(sequence, 'Custom', Action='StopDesktopServer', Before='RemoveFiles')

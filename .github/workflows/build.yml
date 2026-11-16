@@ -1,4 +1,4 @@
-name: 构建 Windows MSI
+name: 构建和验证 Windows 安装包
 
 on:
   workflow_dispatch:
@@ -7,8 +7,9 @@ permissions:
   contents: read
 
 jobs:
-  build-msi:
+  build:
     runs-on: windows-latest
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -17,24 +18,82 @@ jobs:
       - uses: actions/setup-python@v7.1.0
         with:
           python-version: '3.12.10'
-      - name: 安装固定版本依赖
-        shell: pwsh
-        run: |
-          python -m venv .venv
-          .\.venv\Scripts\python.exe -m pip install -r installer\requirements-installed.txt
-      - name: 验证并构建安装包
+      - name: 安装依赖、测试并构建 MSI 与 EXE
         shell: pwsh
         env:
           PYTHONUTF8: '1'
         run: |
-          .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+          python -m venv .venv
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .\.venv\Scripts\python.exe installer\build_msi.py
+          $python = '.\.venv\Scripts\python.exe'
+          & $python -m pip install -r installer\requirements-installed.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python installer\build_msi.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python installer\build_exe.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -LiteralPath 'installer/安装版使用说明.txt' -Destination 'dist/INSTALL.zh-CN.txt'
+          $setup = Get-ChildItem -LiteralPath dist -Filter '*-Setup.exe'
+          $msi = Get-ChildItem -LiteralPath dist -Filter '*.msi'
+          $payload = Join-Path $env:RUNNER_TEMP 'exe-payload'
+          & '.\build\msi-tools\wix314\dark.exe' -nologo -x $payload $setup.FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $embedded = @(Get-ChildItem -LiteralPath $payload -Filter '*.msi' -File -Recurse)
+          if ($embedded.Count -ne 1 -or (Get-FileHash $embedded[0].FullName).Hash -ne (Get-FileHash $msi.FullName).Hash) {
+            throw 'EXE 内嵌的 MSI 与独立 MSI 不一致。'
+          }
       - uses: actions/upload-artifact@v7.0.2
         with:
-          name: WeBan-WebUI-Windows-x64-MSI
+          name: WeBan-WebUI-Windows-x64
+          compression-level: 0
           path: |
             dist/*.msi
+            dist/*.exe
             dist/*.sha256
             dist/*.manifest.json
+            dist/INSTALL.zh-CN.txt
           if-no-files-found: error
+
+  verify:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [clean, broken-100, upgrade-101, broken-101, msi-101]
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: WeBan-WebUI-Windows-x64
+          path: dist
+      - name: 下载用于升级测试的已发布安装包
+        if: matrix.scenario != 'clean'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SCENARIO: ${{ matrix.scenario }}
+        run: |
+          $version = '1.0.1'
+          $suffix = '-Setup.exe'
+          if ($env:SCENARIO -eq 'broken-100') {
+            $version = '1.0.0'
+            $suffix = '.msi'
+          }
+          elseif ($env:SCENARIO -eq 'msi-101') {
+            $suffix = '.msi'
+          }
+          $repo = 'gk1927729093-maker/WeBan-WebUI-Desktop'
+          $target = Join-Path $env:RUNNER_TEMP 'legacy'
+          gh release download "v$version" --repo $repo --pattern "WeBan-WebUI-$version-x64$suffix" --dir $target
+          exit $LASTEXITCODE
+      - name: 验证安装、升级、启动和卸载
+        shell: pwsh
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+        run: ./tests/verify_windows_setup.ps1 -Scenario $env:SCENARIO

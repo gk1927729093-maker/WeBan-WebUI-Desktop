@@ -12,11 +12,13 @@
 
 ## 下载 Windows 安装包
 
-前往 [Releases](https://github.com/gk1927729093-maker/WeBan-WebUI-Desktop/releases/latest) 下载：
+前往 [Releases](https://github.com/gk1927729093-maker/WeBan-WebUI-Desktop/releases/latest) 选择 Windows 10/11 x64 安装包。
 
-- `WeBan-WebUI-1.0.1-x64.msi`：Windows 10/11 64 位安装包，约 52 MiB。
-- 同名 `.sha256` 文件：安装包完整性校验。
-- `INSTALL.zh-CN.txt`：安装与数据目录说明。
+- `WeBan-WebUI-1.0.2-x64-Setup.exe` 可一键安装或升级。升级时会自动修复旧版缺失或损坏的启动器，避免 Windows Installer 错误 1721。
+- `WeBan-WebUI-1.0.2-x64.msi` 支持标准 Windows Installer 部署和自定义安装目录。
+- 安装包各附 SHA256 校验文件。`INSTALL.zh-CN.txt` 提供安装与数据目录说明。
+
+已安装 1.0.0 或 1.0.1 时，直接运行 1.0.2 的 EXE 即可升级。程序沿用原安装目录，账号、进度、题库和日志仍在用户数据目录。
 
 安装包内置 Python 3.12 和应用依赖，不需要另外安装 Python。平台相关功能还需要联网，并使用电脑上已有的 Microsoft Edge 或 Google Chrome。当前安装包未做代码签名，Windows 可能显示发布者未知。
 
@@ -35,7 +37,7 @@
 
 ### 验证码故障排查
 
-旧版在安装路径含中文时可能报 `Can't read ONNX file`。安装 1.0.1 即可修复，升级沿用已有账号数据。
+自 1.0.1 起，验证码模型支持包含中文的安装路径。此前遇到 `Can't read ONNX file` 的用户可升级到当前版本。
 
 如果报错提示缺少 `MFPlat.dll`、`MF.dll` 或 `MFReadWrite.dll`，请按 Windows 版本检查媒体组件。在 Windows 10/11 N 上，可从系统的可选功能安装媒体功能包并重启。[Microsoft 支持说明](https://support.microsoft.com/zh-cn/windows/experience/platform-variants/media-feature-pack-for-windows-n)
 

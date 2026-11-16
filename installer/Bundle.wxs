@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:bal="http://schemas.microsoft.com/wix/BalExtension"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+  <Bundle Name="WeBan WebUI Desktop"
+          Version="$(var.Version).0"
+          Manufacturer="WeBan WebUI"
+          UpgradeCode="685998FB-5451-47B1-BD9D-2C0D0B89D4FA"
+          IconSourceFile="$(var.AppIcon)"
+          AboutUrl="https://github.com/gk1927729093-maker/WeBan-WebUI-Desktop"
+          Compressed="yes">
+    <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.HyperlinkLicense">
+      <bal:WixStandardBootstrapperApplication LicenseUrl="" SuppressOptionsUI="yes" />
+    </BootstrapperApplicationRef>
+    <bal:Condition Message="此安装包需要 64 位 Windows。">VersionNT64</bal:Condition>
+    <util:ProductSearch UpgradeCode="$(var.MsiUpgradeCode)" Variable="InstalledWeBanVersion" Result="version" />
+    <Chain>
+      <ExePackage Id="RepairLegacyLauncher"
+                  SourceFile="$(var.LauncherPath)"
+                  Name="WeBanUpgradeRepair.exe"
+                  DisplayName="修复旧版 WeBan 启动器"
+                  InstallCommand="--repair-legacy-launcher"
+                  InstallCondition="InstalledWeBanVersion &gt;= v1.0.0 AND InstalledWeBanVersion &lt; v$(var.Version)"
+                  PerMachine="no"
+                  Compressed="yes"
+                  Cache="no"
+                  Permanent="yes"
+                  Vital="yes" />
+      <MsiPackage Id="WeBanWebUI" SourceFile="$(var.MsiPath)" Compressed="yes" Vital="yes" />
+    </Chain>
+  </Bundle>
+</Wix>

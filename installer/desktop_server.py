@@ -21,7 +21,7 @@ def main():
 
     @webui.app.get('/api/desktop/identity')
     def desktop_identity():
-        return {'application': 'WeBanWebUI', 'version': '1.0.1',
+        return {'application': 'WeBanWebUI', 'version': '1.0.2',
                 'instance_id': os.environ['WB_DESKTOP_INSTANCE']}
 
     uvicorn.run(webui.app, host='127.0.0.1', port=int(os.environ['WEBUI_PORT']),

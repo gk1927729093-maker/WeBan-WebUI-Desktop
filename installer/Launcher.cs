@@ -10,12 +10,13 @@ using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 [assembly: AssemblyTitle("WeBan WebUI")]
 [assembly: AssemblyDescription("WeBan WebUI 安装版启动和停止入口")]
 [assembly: AssemblyCompany("WeBan WebUI")]
-[assembly: AssemblyVersion("1.0.1.0")]
-[assembly: AssemblyFileVersion("1.0.1.0")]
+[assembly: AssemblyVersion("1.0.2.0")]
+[assembly: AssemblyFileVersion("1.0.2.0")]
 
 public sealed class ServerState
 {
@@ -28,7 +29,7 @@ public sealed class ServerState
 
 internal static class Launcher
 {
-    static readonly string InstallDirectory = Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory).TrimEnd(Path.DirectorySeparatorChar);
+    static string InstallDirectory = Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory).TrimEnd(Path.DirectorySeparatorChar);
     static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
     static string DataDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WeBanWebUI", "Data");
     static string Action = "start";
@@ -43,6 +44,12 @@ internal static class Launcher
     {
         try
         {
+            if (args.Length == 1 && args[0] == "--repair-legacy-launcher")
+            {
+                Quiet = true;
+                RepairLegacyLauncher();
+                return 0;
+            }
             ParseArguments(args);
             if (Action == "stop" && !Directory.Exists(DataDirectory)) return 0;
             Directory.CreateDirectory(Path.Combine(DataDirectory, "logs"));
@@ -80,8 +87,44 @@ internal static class Launcher
         }
     }
 
+    static void RepairLegacyLauncher()
+    {
+        string directory;
+        using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"Software\WeBanWebUI"))
+            directory = key == null ? null : key.GetValue("InstallDirectory") as string;
+        if (String.IsNullOrEmpty(directory))
+            directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                                     "Programs", "WeBan WebUI");
+        directory = Path.GetFullPath(directory);
+        string target = Path.Combine(directory, "WeBanWebUI.exe");
+        if (IsWeBanLauncher(target)) return;
+
+        // 旧版卸载必须能启动此文件。先完整复制，再原子替换，失败时保留可用的旧版。
+        Directory.CreateDirectory(directory);
+        string temporary = Path.Combine(directory, ".weban-upgrade-" + Guid.NewGuid().ToString("N") + ".tmp");
+        try
+        {
+            File.Copy(Assembly.GetExecutingAssembly().Location, temporary);
+            if (File.Exists(target))
+            {
+                if (!IsWeBanLauncher(target)) File.Replace(temporary, target, null);
+            }
+            else File.Move(temporary, target);
+        }
+        finally { File.Delete(temporary); }
+    }
+
+    static bool IsWeBanLauncher(string path)
+    {
+        try { return AssemblyName.GetAssemblyName(path).Name == "WeBanWebUI"; }
+        catch (FileNotFoundException) { return false; }
+        catch (DirectoryNotFoundException) { return false; }
+        catch (BadImageFormatException) { return false; }
+    }
+
     static void ParseArguments(string[] args)
     {
+        string installedDirectory = null;
         for (int index = 0; index < args.Length; index++)
         {
             switch (args[index])
@@ -91,9 +134,15 @@ internal static class Launcher
                 case "--no-browser": NoBrowser = true; break;
                 case "--quiet": Quiet = true; break;
                 case "--data-dir": DataDirectory = Path.GetFullPath(args[++index]); break;
+                case "--installed-directory": installedDirectory = args[++index]; break;
                 case "--port": PreferredPort = int.Parse(args[++index]); break;
                 default: throw new ArgumentException("无法识别的启动参数：" + args[index]);
             }
+        }
+        if (installedDirectory != null)
+        {
+            if (Action != "stop") throw new ArgumentException("--installed-directory 仅支持停止操作。");
+            InstallDirectory = Path.GetFullPath(installedDirectory).TrimEnd(Path.DirectorySeparatorChar);
         }
         if (PreferredPort < 1024 || PreferredPort > 65525) throw new ArgumentException("端口必须在 1024 到 65525 之间。");
         DataDirectory = Path.GetFullPath(DataDirectory).TrimEnd(Path.DirectorySeparatorChar);

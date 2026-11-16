@@ -73,12 +73,17 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('--open-data', [item.get('Arguments') for item in shortcuts])
         self.assertTrue(all(item.get('Root') == 'HKCU' for item in tree.findall('.//w:RegistryValue', NS)))
 
-    def test_uninstall_stops_only_installed_launcher_and_does_not_remove_user_data(self):
+    def test_uninstall_uses_embedded_launcher_and_does_not_remove_user_data(self):
         tree = self.make_wix('payload')
+        binary = tree.find('w:Product/w:Binary[@Id="DesktopStopLauncher"]', NS)
+        self.assertEqual(binary.get('SourceFile'), '$(var.StageDir)\\WeBanWebUI.exe')
         action = tree.find('w:Product/w:CustomAction', NS)
-        self.assertEqual(action.get('ExeCommand'), '--stop --quiet --data-dir "[LocalAppDataFolder]WeBanWebUI\\Data"')
+        self.assertEqual(action.get('ExeCommand'),
+                         '--stop --quiet --data-dir "[LocalAppDataFolder]WeBanWebUI\\Data" '
+                         '--installed-directory "[INSTALLFOLDER]."')
         self.assertEqual(action.get('Return'), 'check')
-        self.assertEqual(action.get('FileKey'), builder.identifier('F', 'WeBanWebUI.exe'))
+        self.assertEqual(action.get('BinaryKey'), 'DesktopStopLauncher')
+        self.assertIsNone(action.get('FileKey'))
         self.assertEqual(tree.find('.//w:Custom', NS).text, 'Installed AND REMOVE="ALL"')
         self.assertFalse(any('Data' == item.get('Name') for item in tree.findall('.//w:Directory', NS)))
         self.assertFalse(tree.findall('.//w:RemoveFile', NS))
